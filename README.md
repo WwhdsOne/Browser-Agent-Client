@@ -94,6 +94,12 @@ Content-Type: application/json
 | GET | `/api/browser-agent/conversation/list` | 会话列表，query: `page,size,title,state` |
 | POST | `/api/browser-agent/conversation/rename` | 重命名，body: `{id,title}` |
 | DELETE | `/api/browser-agent/conversation/delete?id={id}` | 删除会话 |
+
+### 消息管理
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| POST | `/api/browser-agent/messages` | 创建消息，body: `{conversation_id, content}` |
 | GET | `/api/browser-agent/messages?conversation_id={id}` | 消息列表 |
 | GET | `/api/browser-agent/actions?message_id={id}` | 操作列表 |
 
@@ -116,11 +122,18 @@ ws(s)://{HOST}/api/browser-agent/ws/{conversationId}?token={JWT_TOKEN}
 ### 客户端消息
 
 ```typescript
-// 发送任务
-{ type: 'task', task: '打开百度搜索AI', pageState?: PageState }
+// 发送任务（使用 HTTP 创建消息返回的 message_id）
+{ type: 'task', message_id: '123456', pageState?: PageState }
 
-// 执行结果
-{ type: 'result', success: boolean, error?: string, pageState?: PageState }
+// 执行结果（必须返回 action_id 和 execution_time）
+{ 
+  type: 'result', 
+  action_id: string,      // 从收到的 Action 获取
+  success: boolean, 
+  execution_time: number, // 执行耗时（毫秒）
+  error?: string, 
+  pageState?: PageState 
+}
 
 // 恢复执行（人机验证后）
 { type: 'resume', pageState?: PageState }
@@ -129,8 +142,15 @@ ws(s)://{HOST}/api/browser-agent/ws/{conversationId}?token={JWT_TOKEN}
 ### 服务端消息
 
 ```typescript
-// 操作指令
-{ type: 'action', action: { action: 'click', selector: '#btn' } }
+// 操作指令（包含 action_id）
+{ 
+  type: 'action', 
+  action: { 
+    action_id: string,
+    action: 'click', 
+    selector: '#btn' 
+  } 
+}
 
 // 任务完成
 { type: 'finish', message: '任务完成' }
@@ -157,6 +177,8 @@ ws(s)://{HOST}/api/browser-agent/ws/{conversationId}?token={JWT_TOKEN}
 ```typescript
 interface PageState {
   url: string
+  title: string     // 页面标题
+  h1: string        // 页面 h1 文本
   elements: PageElement[]
 }
 
@@ -164,7 +186,12 @@ interface PageElement {
   tag: string       // 标签名
   text: string      // 文本内容
   selector: string  // CSS 选择器
-  visible: boolean  // 是否可见
-  disabled: boolean // 是否禁用
 }
 ```
+
+**元素过滤规则：**
+- 仅保留视口内可见、有文本内容的元素
+- 排除 disabled 元素和 hidden input
+- 保留有明确选择器的元素（id/name/aria-label/placeholder/href）
+- `<a>` 标签优先用 href 作为选择器（长度<80）
+- 选择器长度不超过 100 字符

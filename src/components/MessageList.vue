@@ -1,47 +1,102 @@
 <template>
   <div class="message-list" ref="messageContainer">
-    <div v-if="showVerificationAlert" class="verification-alert">
-      <div class="alert-content">
-        <p>检测到人机验证，请手动完成验证后点击"继续执行"</p>
-      </div>
-    </div>
-    <div
-      v-for="message in messages"
-      :key="message.id"
-      :class="['message', message.role]"
-    >
-      <div class="message-avatar">
-        {{ message.role === 'user' ? 'U' : 'A' }}
-      </div>
-      <div class="message-content">
-        <div class="message-header">
-          <span class="role">{{ message.role === 'user' ? '用户' : '助手' }}</span>
-          <span class="time">{{ formatTime(message.created_at) }}</span>
+    <div class="messages-wrapper">
+      <div
+        v-for="message in messages"
+        :key="message.id"
+        class="message"
+      >
+        <div class="message-content">
+          <div class="message-text">{{ message.content }}</div>
+          <div class="message-footer">
+            <span class="show-actions" @click="toggleActions(message.id)">
+              {{ expandedMessages.has(message.id) ? '收起操作' : '显示操作' }}
+            </span>
+          </div>
+          <div v-if="expandedMessages.has(message.id)" class="actions-panel">
+            <div v-if="loadingActions.has(message.id)" class="actions-loading">加载中...</div>
+            <div v-else-if="getActions(message.id).length === 0" class="actions-empty">暂无操作记录</div>
+            <div v-else class="actions-list">
+              <div
+                v-for="action in getActions(message.id)"
+                :key="action.id"
+                :class="['action-item', action.status]"
+              >
+                <div class="action-header">
+                  <span class="action-type">{{ action.action_type }}</span>
+                  <span class="action-status">{{ statusText(action.status) }}</span>
+                  <span v-if="action.execution_time" class="action-time">{{ action.execution_time }}ms</span>
+                </div>
+                <div class="action-detail">
+                  <span v-if="action.url">URL: {{ action.url }}</span>
+                  <span v-if="action.selector">选择器: {{ action.selector }}</span>
+                  <span v-if="action.value">值: {{ action.value }}</span>
+                  <span v-if="action.distance">距离: {{ action.distance }}px</span>
+                  <span v-if="action.timeout">等待: {{ action.timeout }}ms</span>
+                </div>
+                <div v-if="action.error_message" class="action-error">
+                  {{ action.error_message }}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="message-text">{{ message.content }}</div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue'
-import type { Message } from '@/types'
+import { ref, watch, nextTick } from 'vue'
+import type { Message, ActionResponse } from '@/types'
+import { useConversationStore } from '@/stores/conversation'
 
 const props = defineProps<{
   messages: Message[]
-  state: string
 }>()
 
+const conversationStore = useConversationStore()
 const messageContainer = ref<HTMLElement>()
+const expandedMessages = ref<Set<string>>(new Set())
+const loadingActions = ref<Set<string>>(new Set())
+const actionsData = ref<Map<string, ActionResponse[]>>(new Map())
 
-const showVerificationAlert = computed(() => {
-  return props.state === 'waiting_verification'
-})
+const statusText = (status: string): string => {
+  const map: Record<string, string> = {
+    pending: '等待中',
+    running: '执行中',
+    success: '成功',
+    failed: '失败',
+    skipped: '跳过'
+  }
+  return map[status] || status
+}
 
-const formatTime = (timestamp: string): string => {
-  const date = new Date(timestamp)
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+const loadActions = async (messageId: string) => {
+  loadingActions.value.add(messageId)
+  const actions = await conversationStore.loadActions(messageId)
+  actionsData.value.set(messageId, actions)
+  loadingActions.value.delete(messageId)
+}
+
+const toggleActions = async (messageId: string) => {
+  if (expandedMessages.value.has(messageId)) {
+    expandedMessages.value.delete(messageId)
+  } else {
+    expandedMessages.value.add(messageId)
+    await loadActions(messageId)
+  }
+}
+
+const getActions = (messageId: string): ActionResponse[] => {
+  return actionsData.value.get(messageId) || []
+}
+
+const refreshExpandedActions = async () => {
+  const expandedArray = Array.from(expandedMessages.value)
+  for (const messageId of expandedArray) {
+    await loadActions(messageId)
+  }
 }
 
 watch(() => props.messages.length, () => {
@@ -51,95 +106,141 @@ watch(() => props.messages.length, () => {
     }
   })
 })
+
+defineExpose({
+  refreshExpandedActions
+})
 </script>
 
 <style scoped>
 .message-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 20px;
 }
 
-.verification-alert {
-  background: #4d3800;
-  border: 1px solid #6d5a00;
-  border-radius: 4px;
-  padding: 12px;
-  margin-bottom: 16px;
-}
-
-.alert-content p {
-  color: #dcdcaa;
-  margin: 0;
-  font-size: 14px;
+.messages-wrapper {
+  max-width: 800px;
+  margin: 0 auto;
 }
 
 .message {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-.message.user {
-  flex-direction: row-reverse;
-}
-
-.message-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  font-weight: bold;
-  flex-shrink: 0;
-}
-
-.message.user .message-avatar {
-  background: #0e639c;
-  color: white;
-}
-
-.message.assistant .message-avatar {
-  background: #3e3e3e;
-  color: #d4d4d4;
+  margin-bottom: 24px;
 }
 
 .message-content {
-  max-width: 70%;
-}
-
-.message.user .message-content {
-  align-items: flex-end;
-}
-
-.message-header {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 4px;
-  font-size: 12px;
-}
-
-.role {
-  color: #d4d4d4;
-  font-weight: 500;
-}
-
-.time {
-  color: #858585;
+  width: 100%;
 }
 
 .message-text {
-  background: #2d2d2d;
-  padding: 10px 14px;
-  border-radius: 8px;
   color: #d4d4d4;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.message.user .message-text {
-  background: #0e639c;
+.message-footer {
+  margin-top: 8px;
+}
+
+.show-actions {
+  font-size: 12px;
+  color: #6b6b6b;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.show-actions:hover {
+  color: #007acc;
+}
+
+.actions-panel {
+  margin-top: 12px;
+  background: #1e1e1e;
+  border-radius: 6px;
+  padding: 12px;
+  border: 1px solid #3e3e3e;
+}
+
+.actions-loading,
+.actions-empty {
+  font-size: 12px;
+  color: #858585;
+  text-align: center;
+  padding: 10px;
+}
+
+.actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-item {
+  background: #2d2d2d;
+  border-radius: 4px;
+  padding: 8px 12px;
+  border-left: 3px solid #858585;
+}
+
+.action-item.success {
+  border-left-color: #4ec9b0;
+}
+
+.action-item.failed {
+  border-left-color: #f14c4c;
+}
+
+.action-item.running {
+  border-left-color: #dcdcaa;
+}
+
+.action-header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.action-type {
+  color: #569cd6;
+  font-weight: 500;
+}
+
+.action-status {
+  color: #858585;
+}
+
+.action-item.success .action-status {
+  color: #4ec9b0;
+}
+
+.action-item.failed .action-status {
+  color: #f14c4c;
+}
+
+.action-time {
+  color: #858585;
+  margin-left: auto;
+}
+
+.action-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #9cdcfe;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.action-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #f14c4c;
+  background: #3c1f1f;
+  padding: 4px 8px;
+  border-radius: 3px;
 }
 </style>

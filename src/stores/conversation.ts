@@ -1,6 +1,6 @@
 import {defineStore} from 'pinia'
 import {ref} from 'vue'
-import type {Conversation, Message, ApiResponse, PaginationResp} from '@/types'
+import type {Conversation, Message, ApiResponse, PaginationResp, ActionResponse} from '@/types'
 import {get, post, del} from '@/utils/http'
 
 export interface ConversationListParams {
@@ -14,6 +14,7 @@ export const useConversationStore = defineStore('conversation', () => {
     const conversations = ref<Conversation[]>([])
     const currentConversation = ref<Conversation | null>(null)
     const messages = ref<Map<string, Message[]>>(new Map())
+    const messageActions = ref<Map<string, ActionResponse[]>>(new Map())
 
     const loadConversations = async (params?: ConversationListParams): Promise<void> => {
         try {
@@ -82,6 +83,7 @@ export const useConversationStore = defineStore('conversation', () => {
             await del<ApiResponse<null>>(`/browser-agent/conversation/delete?id=${id}`)
             conversations.value = conversations.value.filter(c => c.id !== id)
             messages.value.delete(id)
+            messageActions.value.delete(id)
             if (currentConversation.value?.id === id) {
                 currentConversation.value = null
             }
@@ -117,13 +119,35 @@ export const useConversationStore = defineStore('conversation', () => {
         messages.value.set(conversationId, msgs)
     }
 
-    const updateConversationState = (conversationId: string, state: Conversation['state']): void => {
-        const conversation = conversations.value.find(c => c.id === conversationId)
-        if (conversation) {
-            conversation.state = state
-            if (currentConversation.value?.id === conversationId) {
-                currentConversation.value.state = state
+    const createMessage = async (conversationId: string, content: string): Promise<Message> => {
+        const response = await post<ApiResponse<Message>>('/browser-agent/message/create', {
+            conversation_id: conversationId,
+            content
+        })
+        if (response.code === 200 && response.data) {
+            const message = {
+                ...response.data,
+                id: String(response.data.id),
+                conversation_id: String(response.data.conversation_id)
             }
+            addMessage(conversationId, message)
+            return message
+        }
+        throw new Error(response.message || '创建消息失败')
+    }
+
+    const loadActions = async (messageId: string): Promise<ActionResponse[]> => {
+        try {
+            const response = await get<ApiResponse<ActionResponse[]>>(
+                `/browser-agent/actions?message_id=${messageId}`
+            )
+            if (response.code === 200 && response.data) {
+                messageActions.value.set(messageId, response.data)
+                return response.data
+            }
+            return []
+        } catch (error) {
+            return []
         }
     }
 
@@ -131,12 +155,14 @@ export const useConversationStore = defineStore('conversation', () => {
         conversations,
         currentConversation,
         messages,
+        messageActions,
         loadConversations,
         createConversation,
         renameConversation,
         deleteConversation,
         selectConversation,
         addMessage,
-        updateConversationState
+        createMessage,
+        loadActions
     }
 })

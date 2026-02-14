@@ -33,6 +33,8 @@ export interface Message {
 
 export interface PageState {
   url: string;
+  title: string;
+  h1: string;
   elements: PageElement[];
 }
 
@@ -40,11 +42,10 @@ export interface PageElement {
   tag: string;
   text: string;
   selector: string;
-  visible: boolean;
-  disabled: boolean;
 }
 
 export interface Action {
+  action_id: string;
   action: ActionType;
   selector?: string;
   value?: string;
@@ -55,23 +56,20 @@ export interface Action {
 
 export interface TaskMessage {
   type: 'task';
-  task: string;
+  message_id: string;
   pageState?: PageState;
 }
 
 export interface ResultMessage {
   type: 'result';
+  action_id: string;
   success: boolean;
+  execution_time: number;
   error?: string;
   pageState?: PageState;
 }
 
-export interface ResumeMessage {
-  type: 'resume';
-  pageState?: PageState;
-}
-
-export type ClientMessage = TaskMessage | ResultMessage | ResumeMessage;
+export type ClientMessage = TaskMessage | ResultMessage;
 
 export interface ActionMessage {
   type: 'action';

@@ -16,16 +16,8 @@
     <div class="main-content">
       <div v-if="conversationStore.currentConversation" class="chat-container">
         <ChatHeader :conversation="conversationStore.currentConversation" />
-        <MessageList
-          :messages="currentMessages"
-          :state="conversationStore.currentConversation.state"
-        />
-        <ChatInput
-          :disabled="!isReady"
-          :show-resume="showResumeButton"
-          @send="handleSend"
-          @resume="handleResume"
-        />
+        <MessageList ref="messageListRef" :messages="currentMessages" />
+        <ChatInput @send="handleSend" />
       </div>
       <div v-else class="empty-state">
         <p>选择或创建一个会话开始</p>
@@ -41,7 +33,7 @@ import { useUserStore } from '@/stores/user'
 import { useConversationStore } from '@/stores/conversation'
 import { useBrowserStore } from '@/stores/browser'
 import { WebSocketManager } from '@/utils/websocket'
-import type { ServerMessage, Message, Action } from '@/types'
+import type { ServerMessage, Action } from '@/types'
 import ConversationList from '@/components/ConversationList.vue'
 import ChatHeader from '@/components/ChatHeader.vue'
 import MessageList from '@/components/MessageList.vue'
@@ -53,19 +45,12 @@ const conversationStore = useConversationStore()
 const browserStore = useBrowserStore()
 
 const wsManager = ref<WebSocketManager | null>(null)
+const messageListRef = ref<{ refreshExpandedActions: () => Promise<void> } | null>(null)
 let currentWSConversationId: string | null = null
 
 const currentMessages = computed(() => {
   if (!conversationStore.currentConversation) return []
   return conversationStore.messages.get(conversationStore.currentConversation.id) || []
-})
-
-const isReady = computed(() => {
-  return conversationStore.currentConversation?.state === 'running'
-})
-
-const showResumeButton = computed(() => {
-  return conversationStore.currentConversation?.state === 'waiting_verification'
 })
 
 const refreshConversationList = async () => {
@@ -134,10 +119,7 @@ const handleWSMessage = async (message: ServerMessage) => {
     case 'finish':
       break
     case 'error':
-      conversationStore.updateConversationState(
-        conversationStore.currentConversation.id,
-        'error'
-      )
+      console.error('WebSocket error:', message.message)
       break
   }
 }
@@ -146,26 +128,28 @@ const executeAction = async (action: Action) => {
   if (!conversationStore.currentConversation) return
   
   const conversationId = conversationStore.currentConversation.id
+  const actionId = action.action_id
+  const startTime = Date.now()
   
   if (action.action === 'close_browser') {
     await window.electronAPI.browser.execute(conversationId, action)
-    conversationStore.updateConversationState(conversationId, 'finished')
+    await messageListRef.value?.refreshExpandedActions()
     return
   }
   
   const result = await window.electronAPI.browser.execute(conversationId, action)
+  const executionTime = Date.now() - startTime
   
-  const isVerification = await window.electronAPI.browser.detectVerification(conversationId)
-  if (isVerification) {
-    conversationStore.updateConversationState(conversationId, 'waiting_verification')
-  } else {
-    wsManager.value?.send({
-      type: 'result',
-      success: result.success,
-      error: result.error,
-      pageState: result.pageState
-    })
-  }
+  wsManager.value?.send({
+    type: 'result',
+    action_id: actionId,
+    success: result.success,
+    execution_time: executionTime,
+    error: result.error,
+    pageState: result.pageState
+  })
+  
+  await messageListRef.value?.refreshExpandedActions()
 }
 
 const ensureWSConnected = async (conversationId: string): Promise<void> => {
@@ -188,15 +172,13 @@ const handleSend = async (content: string) => {
   
   const conversationId = conversationStore.currentConversation.id
   
-  const userMessage: Message = {
-    id: Date.now().toString(),
-    conversation_id: conversationId,
-    role: 'user',
-    content,
-    created_at: new Date().toISOString()
+  let message
+  try {
+    message = await conversationStore.createMessage(conversationId, content)
+  } catch (error) {
+    console.error('Failed to create message:', error)
+    return
   }
-  
-  conversationStore.addMessage(conversationId, userMessage)
   
   await ensureWSConnected(conversationId)
   
@@ -204,23 +186,7 @@ const handleSend = async (content: string) => {
   
   wsManager.value?.send({
     type: 'task',
-    task: content,
-    pageState
-  })
-}
-
-const handleResume = async () => {
-  if (!conversationStore.currentConversation) return
-  
-  const conversationId = conversationStore.currentConversation.id
-  conversationStore.updateConversationState(conversationId, 'running')
-  
-  await ensureWSConnected(conversationId)
-  
-  const pageState = await window.electronAPI.browser.getState(conversationId)
-  
-  wsManager.value?.send({
-    type: 'resume',
+    message_id: message.id,
     pageState
   })
 }
@@ -251,6 +217,7 @@ onBeforeUnmount(() => {
 .home-container {
   display: flex;
   height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -259,6 +226,7 @@ onBeforeUnmount(() => {
   border-right: 1px solid #3e3e3e;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
 }
 
 .sidebar-header {
@@ -291,12 +259,15 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-container {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .empty-state {

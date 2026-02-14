@@ -4,16 +4,17 @@ export interface PageElement {
   tag: string
   text: string
   selector: string
-  visible: boolean
-  disabled: boolean
 }
 
 export interface PageState {
   url: string
+  title: string
+  h1: string
   elements: PageElement[]
 }
 
 export interface Action {
+  action_id: string
   action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser'
   selector?: string
   value?: string
@@ -91,87 +92,116 @@ export class BrowserManager {
   async getPageState(conversationId: string): Promise<PageState> {
     const instance = this.browsers.get(conversationId)
     if (!instance) {
-      return { url: '', elements: [] }
+      return { url: '', title: '', h1: '', elements: [] }
     }
 
     const { page } = instance
     const url = page.url()
+    const title = await page.title()
+    const h1 = await page.locator('h1').first().textContent().catch(() => '') || ''
     const elements = await this.extractPageElements(page)
-    return { url, elements }
+    return { url, title, h1: h1.trim(), elements }
   }
 
   private async extractPageElements(page: Page): Promise<PageElement[]> {
-    const selectors = ['button', 'a', 'input', 'textarea', 'select', '[role="button"]']
-    const elements: PageElement[] = []
+    const MAX_SELECTOR_LENGTH = 100
+    const MAX_HREF_LENGTH = 80
     
-    for (const selector of selectors) {
-      const handles = await page.$$(selector)
-      
-      for (const handle of handles) {
-        try {
-          const isVisible = await handle.isVisible()
-          const isDisabled = await handle.isDisabled()
-          const text = await handle.textContent() || ''
-          const tagName = await handle.evaluate(el => el.tagName.toLowerCase())
-          const elementSelector = await this.generateSelector(handle)
-          
-          if (elementSelector) {
-            elements.push({
-              tag: tagName,
-              text: text.trim(),
-              selector: elementSelector,
-              visible: isVisible,
-              disabled: isDisabled
-            })
-          }
-        } catch {
-          continue
-        }
-      }
-    }
+    const result = await page.evaluate(() => {
+      const viewportHeight = window.innerHeight
+      const viewportWidth = window.innerWidth
+      const items: Array<{
+        tag: string
+        text: string
+        selector: string
+      }> = []
 
-    return elements
-  }
-
-  private async generateSelector(handle: any): Promise<string | null> {
-    try {
-      return await handle.evaluate((el: Element) => {
+      const generateSelector = (el: Element): string | null => {
         if (el.id) return `#${el.id}`
-        if (el.getAttribute('name')) return `[name="${el.getAttribute('name')}"]`
-        if (el.getAttribute('aria-label')) return `[aria-label="${el.getAttribute('aria-label')}"]`
         
-        const path: string[] = []
-        let current: Element | null = el
+        const name = el.getAttribute('name')
+        if (name) return `[name="${name}"]`
         
-        while (current && current !== document.body) {
-          let selector = current.tagName.toLowerCase()
-          
-          if (current.id) {
-            selector = `#${current.id}`
-            path.unshift(selector)
-            break
-          }
-          
-          const parent = current.parentElement
-          if (parent) {
-            const siblings = Array.from(parent.children).filter(
-              child => child.tagName === current!.tagName
-            )
-            if (siblings.length > 1) {
-              const index = siblings.indexOf(current) + 1
-              selector += `:nth-of-type(${index})`
-            }
-          }
-          
-          path.unshift(selector)
-          current = parent
+        const ariaLabel = el.getAttribute('aria-label')
+        if (ariaLabel) return `[aria-label="${ariaLabel}"]`
+        
+        const placeholder = el.getAttribute('placeholder')
+        if (placeholder && placeholder.length < 30) {
+          return `[placeholder="${placeholder}"]`
         }
         
-        return path.join(' > ')
-      })
-    } catch {
-      return null
-    }
+        if (el.tagName.toLowerCase() === 'a') {
+          const href = el.getAttribute('href')
+          if (href && href.length < 80 && !href.startsWith('javascript:')) {
+            return `a[href="${href}"]`
+          }
+        }
+        
+        return null
+      }
+
+      const isInViewport = (el: Element): boolean => {
+        const rect = el.getBoundingClientRect()
+        return (
+          rect.top < viewportHeight &&
+          rect.bottom > 0 &&
+          rect.left < viewportWidth &&
+          rect.right > 0
+        )
+      }
+
+      const isInteractable = (el: Element): boolean => {
+        const htmlEl = el as HTMLElement
+        const style = window.getComputedStyle(el)
+        
+        if (style.display === 'none' || style.visibility === 'hidden') return false
+        if (style.opacity === '0') return false
+        if (htmlEl.offsetWidth === 0 || htmlEl.offsetHeight === 0) return false
+        
+        return true
+      }
+
+      const selectors = [
+        'button:not([disabled])',
+        'a[href]:not([href=""])',
+        'input:not([type="hidden"]):not([disabled])',
+        'textarea:not([disabled])',
+        'select:not([disabled])',
+        '[role="button"]:not([disabled])',
+        '[onclick]:not([disabled])'
+      ]
+
+      const seen = new Set<string>()
+
+      for (const selector of selectors) {
+        try {
+          const nodes = document.querySelectorAll(selector)
+          nodes.forEach((el) => {
+            if (!isInViewport(el)) return
+            if (!isInteractable(el)) return
+            
+            const text = (el.textContent || el.getAttribute('value') || '').trim()
+            if (!text) return
+            
+            const elementSelector = generateSelector(el)
+            if (!elementSelector) return
+            if (elementSelector.length > 100) return
+            if (seen.has(elementSelector)) return
+            seen.add(elementSelector)
+
+            items.push({
+              tag: el.tagName.toLowerCase(),
+              text,
+              selector: elementSelector
+            })
+          })
+        } catch {}
+      }
+
+      return items
+    })
+
+    return result
   }
 
   async detectVerification(conversationId: string): Promise<boolean> {
