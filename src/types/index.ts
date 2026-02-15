@@ -15,9 +15,12 @@ export type LoginResponse = ApiResponse<string>
 
 export type ConversationState = 'running' | 'waiting_verification' | 'finished' | 'error'
 
+export type BrowserType = 'new' | 'existing'
+
 export interface Conversation {
   id: string
   title: string
+  browser_type: BrowserType
   state: ConversationState
   created_at: string
   updated_at: string
@@ -34,7 +37,6 @@ export interface Message {
 export interface PageState {
   url: string;
   title: string;
-  h1: string;
   elements: PageElement[];
 }
 
@@ -42,6 +44,7 @@ export interface PageElement {
   tag: string;
   text: string;
   selector: string;
+  value?: string;
 }
 
 export interface Action {
@@ -57,6 +60,7 @@ export interface Action {
 export interface TaskMessage {
   type: 'task';
   message_id: string;
+  task: string;
   pageState?: PageState;
 }
 
@@ -65,6 +69,7 @@ export interface ResultMessage {
   action_id: string;
   success: boolean;
   execution_time: number;
+  task: string;
   error?: string;
   pageState?: PageState;
 }

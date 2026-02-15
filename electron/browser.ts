@@ -1,307 +1,761 @@
-import type { Browser, Page } from 'playwright'
+import type {Browser, Page} from 'playwright'
+import {exec, spawn} from 'child_process'
+import {promisify} from 'util'
+import {existsSync, mkdirSync} from 'fs'
+import {platform, homedir} from 'os'
+import {join, dirname} from 'path'
+
+const execAsync = promisify(exec)
 
 export interface PageElement {
-  tag: string
-  text: string
-  selector: string
+    tag: string
+    text: string
+    selector: string
+    value?: string
 }
 
 export interface PageState {
-  url: string
-  title: string
-  h1: string
-  elements: PageElement[]
+    url: string
+    title: string
+    elements: PageElement[]
 }
 
 export interface Action {
-  action_id: string
-  action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser'
-  selector?: string
-  value?: string
-  url?: string
-  distance?: number
-  timeout?: number
+    action_id: string
+    action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser'
+    selector?: string
+    value?: string
+    url?: string
+    distance?: number
+    timeout?: number
 }
 
 export interface ActionResult {
-  success: boolean
-  error?: string
-  pageState?: PageState
+    success: boolean
+    error?: string
+    pageState?: PageState
+}
+
+export interface ChromeInfo {
+    found: boolean
+    path?: string
+    error?: string
+}
+
+const CDP_PORT = 9222
+
+function escapeSelector(selector: string): string {
+    if (!selector) return selector
+
+    // 处理 ID 选择器：#xxx
+    if (selector.startsWith('#')) {
+        const idValue = selector.substring(1)
+        // 如果 ID 以数字开头或包含特殊字符，转为属性选择器
+        if (/^[0-9]/.test(idValue) || /[^a-zA-Z0-9_-]/.test(idValue)) {
+            const escaped = `[id="${idValue}"]`
+            console.log(`[选择器转义] ${selector} -> ${escaped}`)
+            return escaped
+        }
+    }
+
+    return selector
+}
+
+function getChromeUserDataDir(): string {
+    const baseDir = join(homedir(), '.chrome-agent')
+    const userDataDir = join(baseDir, 'user-data')
+
+    if (!existsSync(userDataDir)) {
+        mkdirSync(userDataDir, {recursive: true})
+    }
+
+    return userDataDir
+}
+
+const CHROME_PATHS: Record<string, string[]> = {
+    darwin: [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    ],
+    win32: [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.PROGRAMFILES + '\\Google\\Chrome\\Application\\chrome.exe'
+    ].filter(Boolean) as string[]
 }
 
 export class BrowserManager {
-  private browsers: Map<string, { browser: Browser; page: Page }> = new Map()
+    private browsers: Map<string, { browser: Browser; page: Page; isExisting: boolean }> = new Map()
+    private chromeProcess: any = null
 
-  async createBrowser(conversationId: string): Promise<boolean> {
-    try {
-      const { chromium } = await import('playwright')
-      const browser = await chromium.launch({ headless: false })
-      const page = await browser.newPage()
-      
-      this.browsers.set(conversationId, { browser, page })
-      return true
-    } catch (error) {
-      console.error('Failed to create browser:', error)
-      return false
-    }
-  }
+    getDefaultChromePath(): ChromeInfo {
+        const currentPlatform = platform()
+        const paths = CHROME_PATHS[currentPlatform]
 
-  async executeAction(conversationId: string, action: Action): Promise<ActionResult> {
-    const instance = this.browsers.get(conversationId)
-    if (!instance) {
-      return { success: false, error: 'Browser not found' }
-    }
-
-    const { page, browser } = instance
-
-    try {
-      switch (action.action) {
-        case 'goto':
-          await page.goto(action.url!, { waitUntil: 'domcontentloaded' })
-          break
-        case 'click':
-          await page.click(action.selector!)
-          await page.waitForLoadState('domcontentloaded')
-          break
-        case 'input':
-          await page.fill(action.selector!, action.value!)
-          break
-        case 'select':
-          await page.selectOption(action.selector!, action.value!)
-          break
-        case 'scroll':
-          await page.mouse.wheel(0, action.distance!)
-          break
-        case 'wait':
-          await page.waitForTimeout(action.timeout!)
-          break
-        case 'close_browser':
-          await this.closeBrowser(conversationId)
-          return { success: true }
-        default:
-          return { success: false, error: `Unknown action: ${action.action}` }
-      }
-
-      const pageState = await this.getPageState(conversationId)
-      return { success: true, pageState }
-    } catch (error) {
-      return { success: false, error: String(error) }
-    }
-  }
-
-  async getPageState(conversationId: string): Promise<PageState> {
-    const instance = this.browsers.get(conversationId)
-    if (!instance) {
-      return { url: '', title: '', h1: '', elements: [] }
-    }
-
-    const { page } = instance
-    const url = page.url()
-    const title = await page.title()
-    const h1 = await page.locator('h1').first().textContent().catch(() => '') || ''
-    const elements = await this.extractPageElements(page)
-    return { url, title, h1: h1.trim(), elements }
-  }
-
-  private async extractPageElements(page: Page): Promise<PageElement[]> {
-    const MAX_SELECTOR_LENGTH = 100
-    const MAX_HREF_LENGTH = 80
-    
-    const result = await page.evaluate(() => {
-      const viewportHeight = window.innerHeight
-      const viewportWidth = window.innerWidth
-      const items: Array<{
-        tag: string
-        text: string
-        selector: string
-      }> = []
-
-      const generateSelector = (el: Element): string | null => {
-        if (el.id) return `#${el.id}`
-        
-        const name = el.getAttribute('name')
-        if (name) return `[name="${name}"]`
-        
-        const ariaLabel = el.getAttribute('aria-label')
-        if (ariaLabel) return `[aria-label="${ariaLabel}"]`
-        
-        const placeholder = el.getAttribute('placeholder')
-        if (placeholder && placeholder.length < 30) {
-          return `[placeholder="${placeholder}"]`
+        if (!paths) {
+            return {found: false, error: '不支持的操作系统'}
         }
-        
-        if (el.tagName.toLowerCase() === 'a') {
-          const href = el.getAttribute('href')
-          if (href && href.length < 80 && !href.startsWith('javascript:')) {
-            return `a[href="${href}"]`
-          }
+
+        for (const path of paths) {
+            if (existsSync(path)) {
+                return {found: true, path}
+            }
         }
-        
-        return null
-      }
 
-      const isInViewport = (el: Element): boolean => {
-        const rect = el.getBoundingClientRect()
-        return (
-          rect.top < viewportHeight &&
-          rect.bottom > 0 &&
-          rect.left < viewportWidth &&
-          rect.right > 0
-        )
-      }
+        return {found: false, error: '未找到 Chrome 浏览器'}
+    }
 
-      const isInteractable = (el: Element): boolean => {
-        const htmlEl = el as HTMLElement
-        const style = window.getComputedStyle(el)
-        
-        if (style.display === 'none' || style.visibility === 'hidden') return false
-        if (style.opacity === '0') return false
-        if (htmlEl.offsetWidth === 0 || htmlEl.offsetHeight === 0) return false
-        
-        return true
-      }
+    validateChromePath(path: string): ChromeInfo {
+        if (!path) {
+            return {found: false, error: '请选择 Chrome 路径'}
+        }
 
-      const selectors = [
-        'button:not([disabled])',
-        'a[href]:not([href=""])',
-        'input:not([type="hidden"]):not([disabled])',
-        'textarea:not([disabled])',
-        'select:not([disabled])',
-        '[role="button"]:not([disabled])',
-        '[onclick]:not([disabled])'
-      ]
+        const normalizedPath = path.trim()
 
-      const seen = new Set<string>()
+        if (!existsSync(normalizedPath)) {
+            return {found: false, error: '路径不存在'}
+        }
 
-      for (const selector of selectors) {
+        const currentPlatform = platform()
+        const isWindows = currentPlatform === 'win32'
+        const isMac = currentPlatform === 'darwin'
+
+        if (isWindows) {
+            if (!normalizedPath.toLowerCase().endsWith('chrome.exe') &&
+                !normalizedPath.toLowerCase().endsWith('chromium.exe')) {
+                return {found: false, error: '请选择 Chrome 或 Chromium 可执行文件'}
+            }
+        } else if (isMac) {
+            if (!normalizedPath.includes('Chrome') && !normalizedPath.includes('Chromium')) {
+                return {found: false, error: '请选择 Chrome 或 Chromium 可执行文件'}
+            }
+        }
+
+        return {found: true, path: normalizedPath}
+    }
+
+    async launchChromeWithDebug(chromePath: string): Promise<{ success: boolean; error?: string }> {
+        return new Promise(async (resolve) => {
+            try {
+                const isWindows = platform() === 'win32'
+                const userDataDir = getChromeUserDataDir()
+
+                const args = [
+                    `--remote-debugging-port=${CDP_PORT}`,
+                    `--user-data-dir=${userDataDir}`,
+                    '--no-first-run',
+                    '--no-default-browser-check'
+                ]
+
+                console.log('========== Chrome 启动调试信息 ==========')
+                console.log('时间:', new Date().toISOString())
+                console.log('平台:', isWindows ? 'Windows' : 'macOS/Linux')
+                console.log('Chrome 路径:', chromePath)
+                console.log('用户数据目录:', userDataDir)
+                console.log('启动参数:', args.join(' '))
+                console.log('CDP 端口:', CDP_PORT)
+                console.log('==========================================')
+
+                if (isWindows) {
+                    this.chromeProcess = spawn(chromePath, args, {
+                        detached: true,
+                        stdio: ['ignore', 'pipe', 'pipe'],
+                        shell: true
+                    })
+                } else {
+                    this.chromeProcess = spawn(chromePath, args, {
+                        detached: true,
+                        stdio: ['ignore', 'pipe', 'pipe']
+                    })
+                }
+
+                this.chromeProcess.stdout?.on('data', (data: Buffer) => {
+                    console.log('[Chrome stdout]:', data.toString().trim())
+                })
+
+                this.chromeProcess.stderr?.on('data', (data: Buffer) => {
+                    console.log('[Chrome stderr]:', data.toString().trim())
+                })
+
+                this.chromeProcess.on('error', (err: Error) => {
+                    console.error('[Chrome 启动错误]:', err)
+                    resolve({success: false, error: '启动 Chrome 失败: ' + err.message})
+                    return
+                })
+
+                this.chromeProcess.on('close', (code: number) => {
+                    console.log('[Chrome 进程退出], 退出码:', code)
+                })
+
+                this.chromeProcess.unref()
+
+                const maxRetries = 15
+                const retryInterval = 500
+
+                console.log('开始检测 CDP 端口...')
+
+                for (let i = 0; i < maxRetries; i++) {
+                    await new Promise(r => setTimeout(r, retryInterval))
+
+                    try {
+                        console.log(`[CDP 检测] 第 ${i + 1}/${maxRetries} 次尝试连接 http://localhost:${CDP_PORT}/json/version`)
+
+                        const response = await fetch(`http://localhost:${CDP_PORT}/json/version`, {
+                            method: 'GET',
+                            signal: AbortSignal.timeout(2000)
+                        })
+
+                        if (response.ok) {
+                            const data = await response.json()
+                            console.log('[CDP 检测] 成功! 响应:', JSON.stringify(data, null, 2))
+                            console.log('========== Chrome 启动成功 ==========')
+                            resolve({success: true})
+                            return
+                        } else {
+                            console.log(`[CDP 检测] 响应异常, status: ${response.status}`)
+                        }
+                    } catch (e) {
+                        console.log(`[CDP 检测] 连接失败:`, (e as Error).message)
+                    }
+                }
+
+                console.log('[CDP 检测] 超时, 所有重试均已失败')
+                resolve({
+                    success: false,
+                    error: 'Chrome 启动超时，请检查是否有其他 Chrome 实例占用 9222 端口，或尝试关闭所有 Chrome 后重试'
+                })
+
+            } catch (error) {
+                console.error('[Chrome 启动异常]:', error)
+                resolve({success: false, error: '启动 Chrome 失败: ' + (error as Error).message})
+            }
+        })
+    }
+
+    async createBrowser(conversationId: string): Promise<boolean> {
         try {
-          const nodes = document.querySelectorAll(selector)
-          nodes.forEach((el) => {
-            if (!isInViewport(el)) return
-            if (!isInteractable(el)) return
-            
-            const text = (el.textContent || el.getAttribute('value') || '').trim()
-            if (!text) return
-            
-            const elementSelector = generateSelector(el)
-            if (!elementSelector) return
-            if (elementSelector.length > 100) return
-            if (seen.has(elementSelector)) return
-            seen.add(elementSelector)
+            const {chromium} = await import('playwright')
+            const userDataDir = getChromeUserDataDir()
 
-            items.push({
-              tag: el.tagName.toLowerCase(),
-              text,
-              selector: elementSelector
+            console.log('========== 创建临时浏览器 ==========')
+            console.log('用户数据目录:', userDataDir)
+            console.log('====================================')
+
+            const browser = await chromium.launch({
+                headless: false,
+                args: [
+                    `--user-data-dir=${userDataDir}`,
+                    '--no-first-run',
+                    '--no-default-browser-check'
+                ]
             })
-          })
-        } catch {}
-      }
+            const page = await browser.newPage()
 
-      return items
-    })
-
-    return result
-  }
-
-  async detectVerification(conversationId: string): Promise<boolean> {
-    const instance = this.browsers.get(conversationId)
-    if (!instance) return false
-
-    const { page } = instance
-    try {
-      const url = page.url().toLowerCase()
-      
-      const verificationDomains = [
-        'challenges.cloudflare.com',
-        'recaptcha.net',
-        'www.google.com/recaptcha',
-        'hcaptcha.com',
-        'captcha.deluxe'
-      ]
-      for (const domain of verificationDomains) {
-        if (url.includes(domain)) return true
-      }
-
-      const captchaSelectors = [
-        'iframe[src*="recaptcha"]',
-        'iframe[src*="hcaptcha"]',
-        'iframe[src*="challenges.cloudflare"]',
-        '.g-recaptcha',
-        '.h-captcha',
-        '#captcha',
-        '[class*="captcha"]',
-        '[id*="captcha"]',
-        '.challenge-form',
-        '.cf-challenge',
-        '#cf-challenge-running',
-        '[data-sitekey]'
-      ]
-      
-      for (const selector of captchaSelectors) {
-        const element = await page.$(selector)
-        if (element) {
-          const isVisible = await element.isVisible()
-          if (isVisible) return true
+            this.browsers.set(conversationId, {browser, page, isExisting: false})
+            return true
+        } catch (error) {
+            console.error('Failed to create browser:', error)
+            return false
         }
-      }
+    }
 
-      const sliderSelectors = [
-        '.slider-btn',
-        '.slide-verify',
-        '[class*="slider"]',
-        '[class*="slide-verify"]',
-        'canvas[class*="verify"]',
-        '.geetest',
-        '.gt_slider'
-      ]
-      
-      for (const selector of sliderSelectors) {
-        const element = await page.$(selector)
-        if (element) {
-          const isVisible = await element.isVisible()
-          if (isVisible) return true
+    async isCDPPortAvailable(): Promise<boolean> {
+        try {
+            const response = await fetch(`http://localhost:${CDP_PORT}/json/version`, {
+                method: 'GET',
+                signal: AbortSignal.timeout(2000)
+            })
+            return response.ok
+        } catch {
+            return false
         }
-      }
-
-      const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
-      const pageTitle = await page.title()
-      const combinedText = (bodyText + ' ' + pageTitle).toLowerCase()
-      
-      const strongIndicators = [
-        '请完成安全验证',
-        '请拖动滑块完成验证',
-        'security check',
-        'please complete the security check',
-        'prove you are human',
-        'are you a robot',
-        'verify you are human',
-        'complete the captcha'
-      ]
-      
-      for (const indicator of strongIndicators) {
-        if (combinedText.includes(indicator.toLowerCase())) return true
-      }
-      
-      return false
-    } catch {
-      return false
     }
-  }
 
-  async closeBrowser(conversationId: string): Promise<boolean> {
-    const instance = this.browsers.get(conversationId)
-    if (instance) {
-      await instance.browser.close()
-      this.browsers.delete(conversationId)
-      return true
-    }
-    return false
-  }
+    async connectOrLaunchBrowser(chromePath: string, conversationId: string): Promise<{
+        success: boolean;
+        error?: string
+    }> {
+        const isAvailable = await this.isCDPPortAvailable()
 
-  async closeAll(): Promise<void> {
-    for (const conversationId of Array.from(this.browsers.keys())) {
-      await this.closeBrowser(conversationId)
+        if (isAvailable) {
+            console.log('[CDP 端口已就绪，直接连接]')
+            return await this.connectExistingBrowser(conversationId)
+        }
+
+        console.log('[CDP 端口未就绪，启动 Chrome]')
+        const launchResult = await this.launchChromeWithDebug(chromePath)
+
+        if (!launchResult.success) {
+            return launchResult
+        }
+
+        return await this.connectExistingBrowser(conversationId)
     }
-  }
+
+    async connectExistingBrowser(conversationId: string): Promise<{ success: boolean; error?: string }> {
+        const maxRetries = 3
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const {chromium} = await import('playwright')
+                const browser = await chromium.connectOverCDP(`http://localhost:${CDP_PORT}`)
+
+                const contexts = browser.contexts()
+                if (contexts.length === 0) {
+                    return {success: false, error: '未找到浏览器上下文'}
+                }
+
+                const context = contexts[0]
+                const pages = context.pages()
+                const page = pages.length > 0 ? pages[0] : await context.newPage()
+
+                this.browsers.set(conversationId, {browser, page, isExisting: true})
+                return {success: true}
+            } catch (error) {
+                console.error(`Failed to connect to existing browser (attempt ${attempt + 1}):`, error)
+
+                if (attempt < maxRetries - 1) {
+                    await new Promise(r => setTimeout(r, 500))
+                } else {
+                    return {
+                        success: false,
+                        error: '连接失败，请确保 Chrome 已使用 --remote-debugging-port=9222 启动'
+                    }
+                }
+            }
+        }
+
+        return {success: false, error: '连接失败'}
+    }
+
+    async executeAction(conversationId: string, action: Action): Promise<ActionResult> {
+        const instance = this.browsers.get(conversationId)
+        if (!instance) {
+            return {success: false, error: 'Browser not found'}
+        }
+
+        const {page, browser} = instance
+
+        try {
+            const context = page.context()
+            const pagesBefore = context.pages()
+
+            switch (action.action) {
+                case 'goto':
+                    await page.goto(action.url!, {waitUntil: 'domcontentloaded'})
+                    break
+                case 'click':
+                    await page.click(escapeSelector(action.selector!))
+                    await page.waitForLoadState('domcontentloaded')
+                    break
+                case 'input':
+                    const inputSelector = escapeSelector(action.selector!)
+                    await page.fill(inputSelector, action.value!)
+                    await page.press(inputSelector, 'Enter')
+                    break
+                case 'select':
+                    await page.selectOption(escapeSelector(action.selector!), action.value!)
+                    break
+                case 'scroll':
+                    await page.mouse.wheel(0, action.distance!)
+                    break
+                case 'wait':
+                    await page.waitForTimeout(action.timeout!)
+                    break
+                case 'close_browser':
+                    await this.closeBrowser(conversationId)
+                    return {success: true}
+                default:
+                    return {success: false, error: `Unknown action: ${action.action}`}
+            }
+
+            // 等待页面操作稳定
+            await page.waitForTimeout(2000)
+
+            const pagesAfter = context.pages()
+
+            // 如果当前打开页面超过 1 个
+            if (pagesAfter.length > 1) {
+                // 保留最新页面（数组最后一个）
+                const newPage = pagesAfter[pagesAfter.length - 1]
+
+                // 关闭其他所有页面
+                for (const p of pagesAfter) {
+                    if (p !== newPage && !p.isClosed()) {
+                        console.log(`[关闭旧页面] ${p.url()}`)
+                        await p.close().catch(() => {
+                        }) // 避免报错
+                    }
+                }
+
+                // 更新浏览器记录，保留最新页面
+                this.browsers.set(conversationId, {browser, page: newPage, isExisting: instance.isExisting})
+                console.log(`[保留新页面] ${newPage.url()}`)
+            }
+
+
+            const pageState = await this.getPageState(conversationId)
+            return {success: true, pageState}
+        } catch (error) {
+            return {success: false, error: String(error)}
+        }
+    }
+
+    async getPageState(conversationId: string): Promise<PageState> {
+        const instance = this.browsers.get(conversationId)
+        if (!instance) {
+            return {url: '', title: '', elements: []}
+        }
+
+        const {page} = instance
+
+        const t0 = Date.now()
+        const url = page.url()
+        console.log(`[getState] url: ${Date.now() - t0}ms`)
+
+        const t1 = Date.now()
+        const title = await page.title()
+        console.log(`[getState] title: ${Date.now() - t1}ms`)
+
+        const t2 = Date.now()
+        const elements = await this.extractPageElements(page)
+        console.log(`[getState] extractPageElements: ${Date.now() - t2}ms`)
+
+        console.log(`[getState] 总计: ${Date.now() - t0}ms`)
+        return {url, title, elements}
+    }
+
+    private async extractPageElements(page: Page): Promise<PageElement[]> {
+        const result = await page.evaluate(() => {
+            const viewportHeight = window.innerHeight
+            const viewportWidth = window.innerWidth
+            const items: Array<{
+                tag: string
+                text: string
+                selector: string
+                value?: string
+            }> = []
+
+            const generateSelector = (el: Element): string | null => {
+                if (el.id) return `#${el.id}`
+
+                const name = el.getAttribute('name')
+                if (name) return `[name="${name}"]`
+
+                const ariaLabel = el.getAttribute('aria-label')
+                if (ariaLabel) return `[aria-label="${ariaLabel}"]`
+
+                const placeholder = el.getAttribute('placeholder')
+                if (placeholder && placeholder.length < 30) {
+                    return `[placeholder="${placeholder}"]`
+                }
+
+                if (el.tagName.toLowerCase() === 'a') {
+                    const href = el.getAttribute('href')
+                    if (href && href.length < 80 && !href.startsWith('javascript:')) {
+                        return `a[href="${href}"]`
+                    }
+                }
+
+                const tagName = el.tagName.toLowerCase()
+                if (['input', 'textarea', 'select'].includes(tagName)) {
+                    const classList = Array.from(el.classList)
+                    if (classList.length > 0) {
+                        return `${tagName}.${classList[0]}`
+                    }
+                }
+
+                return null
+            }
+
+            const isInViewport = (el: Element): boolean => {
+                const rect = el.getBoundingClientRect()
+                return (
+                    rect.top < viewportHeight &&
+                    rect.bottom > 0 &&
+                    rect.left < viewportWidth &&
+                    rect.right > 0
+                )
+            }
+
+            const isInteractable = (el: Element): boolean => {
+                const htmlEl = el as HTMLElement
+                const style = window.getComputedStyle(el)
+
+                if (style.display === 'none' || style.visibility === 'hidden') return false
+                if (style.opacity === '0') return false
+                if (htmlEl.offsetWidth === 0 || htmlEl.offsetHeight === 0) return false
+
+                return true
+            }
+
+            const selectors = [
+                'button:not([disabled])',
+                'a[href]:not([href=""])',
+                'input:not([type="hidden"]):not([disabled])',
+                'textarea:not([disabled])',
+                'select:not([disabled])',
+                '[role="button"]:not([disabled])',
+                '[onclick]:not([disabled])'
+            ]
+
+            const seen = new Set<string>()
+
+            for (const selector of selectors) {
+                try {
+                    const nodes = document.querySelectorAll(selector)
+                    nodes.forEach((el) => {
+                        if (!isInViewport(el)) return
+                        if (!isInteractable(el)) return
+
+                        const elementSelector = generateSelector(el)
+                        if (!elementSelector) return
+                        if (elementSelector.length > 100) return
+                        if (seen.has(elementSelector)) return
+                        seen.add(elementSelector)
+
+                        const tagName = el.tagName.toLowerCase()
+                        const isInputElement = tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+
+                        let text = ''
+                        let value: string | undefined = undefined
+
+                        if (isInputElement) {
+                            if (tagName === 'select') {
+                                const selectEl = el as HTMLSelectElement
+                                value = selectEl.value || ''
+                                const selectedOption = selectEl.options[selectEl.selectedIndex]
+                                text = selectedOption ? selectedOption.text : ''
+                            } else {
+                                const inputEl = el as HTMLInputElement | HTMLTextAreaElement
+                                value = inputEl.value || ''
+                                text = (inputEl as HTMLInputElement).placeholder || el.getAttribute('aria-label') || ''
+                            }
+                        } else {
+                            text = (el.textContent || '').trim()
+                        }
+
+                        if (!text && !isInputElement) return
+
+                        items.push({
+                            tag: tagName,
+                            text,
+                            selector: elementSelector,
+                            ...(value ? {value} : {})
+                        })
+                    })
+                } catch {
+                }
+            }
+
+            return items
+        })
+
+        return result
+    }
+
+    async detectVerification(conversationId: string): Promise<boolean> {
+        const instance = this.browsers.get(conversationId)
+        if (!instance) return false
+
+        const {page} = instance
+        try {
+            const url = page.url().toLowerCase()
+
+            const verificationDomains = [
+                'challenges.cloudflare.com',
+                'recaptcha.net',
+                'www.google.com/recaptcha',
+                'hcaptcha.com',
+                'captcha.deluxe'
+            ]
+            for (const domain of verificationDomains) {
+                if (url.includes(domain)) return true
+            }
+
+            const captchaSelectors = [
+                'iframe[src*="recaptcha"]',
+                'iframe[src*="hcaptcha"]',
+                'iframe[src*="challenges.cloudflare"]',
+                '.g-recaptcha',
+                '.h-captcha',
+                '#captcha',
+                '[class*="captcha"]',
+                '[id*="captcha"]',
+                '.challenge-form',
+                '.cf-challenge',
+                '#cf-challenge-running',
+                '[data-sitekey]'
+            ]
+
+            for (const selector of captchaSelectors) {
+                const element = await page.$(selector)
+                if (element) {
+                    const isVisible = await element.isVisible()
+                    if (isVisible) return true
+                }
+            }
+
+            const sliderSelectors = [
+                '.slider-btn',
+                '.slide-verify',
+                '[class*="slider"]',
+                '[class*="slide-verify"]',
+                'canvas[class*="verify"]',
+                '.geetest',
+                '.gt_slider'
+            ]
+
+            for (const selector of sliderSelectors) {
+                const element = await page.$(selector)
+                if (element) {
+                    const isVisible = await element.isVisible()
+                    if (isVisible) return true
+                }
+            }
+
+            const bodyText = await page.locator('body').innerText({timeout: 1000}).catch(() => '')
+            const pageTitle = await page.title()
+            const combinedText = (bodyText + ' ' + pageTitle).toLowerCase()
+
+            const strongIndicators = [
+                '请完成安全验证',
+                '请拖动滑块完成验证',
+                'security check',
+                'please complete the security check',
+                'prove you are human',
+                'are you a robot',
+                'verify you are human',
+                'complete the captcha'
+            ]
+
+            for (const indicator of strongIndicators) {
+                if (combinedText.includes(indicator.toLowerCase())) return true
+            }
+
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    async detectLoginPage(conversationId: string): Promise<boolean> {
+        const instance = this.browsers.get(conversationId)
+        if (!instance) return false
+
+        const {page} = instance
+        try {
+            const url = page.url().toLowerCase()
+
+            const loginUrlPatterns = [
+                '/login',
+                '/signin',
+                '/sign-in',
+                '/auth',
+                '/passport',
+                '/account/login',
+                '/user/login',
+                '/member/login',
+                '/register',
+                '/signup',
+                '/verification',
+                '/verify',
+                'login.',
+                'signin.',
+                'auth.',
+            ]
+
+            for (const pattern of loginUrlPatterns) {
+                if (url.includes(pattern)) {
+                    console.log(`[登录检测] URL 匹配: ${pattern}`)
+                    return true
+                }
+            }
+
+            const loginSelectors = [
+                'input[type="password"]',
+                'input[type="email"][name*="login"]',
+                'input[placeholder*="手机"]',
+                'input[placeholder*="邮箱"]',
+                'input[placeholder*="账号"]',
+                'input[placeholder*="用户名"]',
+                '.login-form',
+                '.signin-form',
+                '#login-form',
+                '[class*="login"]',
+                '[id*="login"]',
+            ]
+
+            for (const selector of loginSelectors) {
+                const element = await page.$(selector)
+                if (element) {
+                    const isVisible = await element.isVisible()
+                    if (isVisible) {
+                        console.log(`[登录检测] 选择器匹配: ${selector}`)
+                        return true
+                    }
+                }
+            }
+
+            const bodyText = await page.locator('body').innerText({timeout: 1000}).catch(() => '')
+            const pageTitle = await page.title()
+            const combinedText = (bodyText + ' ' + pageTitle).toLowerCase()
+
+            const loginKeywords = [
+                '登录',
+                '账号登录',
+                '手机号登录',
+                '扫码登录',
+                '密码登录',
+                '登录',
+                '注册',
+                'sign in',
+                'log in',
+                'login',
+                'create account',
+            ]
+
+            for (const keyword of loginKeywords) {
+                if (combinedText.includes(keyword.toLowerCase())) {
+                    console.log(`[登录检测] 关键词匹配: ${keyword}`)
+                    return true
+                }
+            }
+
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    async closeBrowser(conversationId: string): Promise<boolean> {
+        const instance = this.browsers.get(conversationId)
+        if (instance) {
+            try {
+                if (instance.isExisting) {
+                    const cdpSession = await instance.browser.newBrowserCDPSession()
+                    await cdpSession.send('Browser.close')
+                    await cdpSession.detach()
+                } else {
+                    await instance.browser.close()
+                }
+            } catch (error) {
+                console.error('Failed to close browser:', error)
+                try {
+                    await instance.browser.close()
+                } catch {
+                }
+            }
+            this.browsers.delete(conversationId)
+            return true
+        }
+        return false
+    }
+
+    async closeAll(): Promise<void> {
+        for (const conversationId of Array.from(this.browsers.keys())) {
+            await this.closeBrowser(conversationId)
+        }
+    }
 }

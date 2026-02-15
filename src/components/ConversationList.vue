@@ -23,6 +23,9 @@
               />
             </div>
             <div v-else class="conversation-title">{{ conversation.title || '未命名会话' }}</div>
+            <div class="conversation-meta">
+              <span class="browser-type">{{ conversation.browser_type === 'existing' ? '已有浏览器' : '新浏览器' }}</span>
+            </div>
           </div>
           <div class="conversation-actions">
             <button class="action-btn" @click.stop="startEdit(conversation)" title="重命名">
@@ -230,6 +233,18 @@ const handleDelete = (id: string) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-meta {
+  margin-top: 2px;
+}
+
+.browser-type {
+  font-size: 11px;
+  color: #6b6b6b;
+  background: #2d2d2d;
+  padding: 1px 6px;
+  border-radius: 3px;
 }
 
 .edit-input-wrapper {

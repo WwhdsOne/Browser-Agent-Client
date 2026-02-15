@@ -56,6 +56,18 @@ VITE_BACKEND_URL=http://localhost:8888
 - 实时通信：WebSocket 与后端智能体实时交互
 - 浏览器控制：通过 Playwright 执行自动化操作
 - 人机验证检测：自动识别验证码/滑块等验证场景
+- 浏览器类型选择：支持新开浏览器或连接已有 Chrome（自动启动带调试端口）
+
+## 浏览器类型
+
+创建会话时可选择：
+
+1. **新开浏览器** - 启动全新的 Chrome 实例
+2. **连接已有浏览器** - 自动检测并启动带 `--remote-debugging-port=9222` 的 Chrome
+
+**Chrome 默认检测路径：**
+- macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Windows: `C:\Program Files\Google\Chrome\Application\chrome.exe`
 
 ## 支持的操作类型
 
@@ -90,10 +102,12 @@ Content-Type: application/json
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| POST | `/api/browser-agent/conversation/create` | 创建会话，body: `{title}` |
+| POST | `/api/browser-agent/conversation/create` | 创建会话，body: `{title, browser_type}` |
 | GET | `/api/browser-agent/conversation/list` | 会话列表，query: `page,size,title,state` |
 | POST | `/api/browser-agent/conversation/rename` | 重命名，body: `{id,title}` |
 | DELETE | `/api/browser-agent/conversation/delete?id={id}` | 删除会话 |
+
+**browser_type:** `new` (新开浏览器) 或 `existing` (连接已有浏览器)
 
 ### 消息管理
 
@@ -184,8 +198,9 @@ interface PageState {
 
 interface PageElement {
   tag: string       // 标签名
-  text: string      // 文本内容
+  text: string      // 文本内容（input 为 placeholder/aria-label）
   selector: string  // CSS 选择器
+  value?: string    // input/textarea/select 的当前值
 }
 ```
 
@@ -195,3 +210,4 @@ interface PageElement {
 - 保留有明确选择器的元素（id/name/aria-label/placeholder/href）
 - `<a>` 标签优先用 href 作为选择器（长度<80）
 - 选择器长度不超过 100 字符
+- input/textarea/select 元素会额外返回 `value` 字段（当前输入值）

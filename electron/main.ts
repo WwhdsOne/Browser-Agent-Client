@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session } from 'electron'
+import { app, BrowserWindow, ipcMain, session, dialog } from 'electron'
 import { join } from 'path'
 import { BrowserManager } from './browser.js'
 
@@ -65,6 +65,10 @@ function setupIPC() {
     return await browserManager.createBrowser(conversationId)
   })
 
+  ipcMain.handle('browser:connectExisting', async (_, conversationId: string) => {
+    return await browserManager.connectExistingBrowser(conversationId)
+  })
+
   ipcMain.handle('browser:execute', async (_, conversationId: string, action: any) => {
     return await browserManager.executeAction(conversationId, action)
   })
@@ -79,5 +83,45 @@ function setupIPC() {
 
   ipcMain.handle('browser:detectVerification', async (_, conversationId: string) => {
     return await browserManager.detectVerification(conversationId)
+  })
+
+  ipcMain.handle('browser:detectLogin', async (_, conversationId: string) => {
+    return await browserManager.detectLoginPage(conversationId)
+  })
+
+  ipcMain.handle('browser:isCDPReady', async () => {
+    return await browserManager.isCDPPortAvailable()
+  })
+
+  ipcMain.handle('browser:connectOrLaunch', async (_, chromePath: string, conversationId: string) => {
+    return await browserManager.connectOrLaunchBrowser(chromePath, conversationId)
+  })
+
+  ipcMain.handle('chrome:getDefaultPath', async () => {
+    return browserManager.getDefaultChromePath()
+  })
+
+  ipcMain.handle('chrome:validatePath', async (_, path: string) => {
+    return browserManager.validateChromePath(path)
+  })
+
+  ipcMain.handle('chrome:selectPath', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '选择 Chrome 可执行文件',
+      properties: ['openFile'],
+      filters: [
+        { name: '可执行文件', extensions: ['exe', 'app', '*'] }
+      ]
+    })
+    
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true }
+    }
+    
+    return { canceled: false, path: result.filePaths[0] }
+  })
+
+  ipcMain.handle('chrome:launch', async (_, chromePath: string) => {
+    return await browserManager.launchChromeWithDebug(chromePath)
   })
 }

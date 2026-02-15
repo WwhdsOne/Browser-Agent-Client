@@ -1,6 +1,6 @@
 import {defineStore} from 'pinia'
 import {ref} from 'vue'
-import type {Conversation, Message, ApiResponse, PaginationResp, ActionResponse} from '@/types'
+import type {Conversation, Message, ApiResponse, PaginationResp, ActionResponse, BrowserType} from '@/types'
 import {get, post, del} from '@/utils/http'
 
 export interface ConversationListParams {
@@ -43,10 +43,11 @@ export const useConversationStore = defineStore('conversation', () => {
         }
     }
 
-    const createConversation = async (title: string = '新会话'): Promise<Conversation> => {
+    const createConversation = async (title: string = '新会话', browserType: BrowserType = 'new'): Promise<Conversation> => {
         try {
             const response = await post<ApiResponse<Conversation>>('/browser-agent/conversation/create', {
-                title
+                title,
+                browser_type: browserType
             })
             if (response.code === 200 && response.data) {
                 const conversation = {
