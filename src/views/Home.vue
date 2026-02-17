@@ -153,6 +153,7 @@ const isPaused = ref(false)
 const pauseReason = ref('')
 const pendingActionId = ref('')
 const currentTask = ref('')
+const currentMessageId = ref('')
 let currentWSConversationId: string | null = null
 
 const currentMessages = computed(() => {
@@ -389,6 +390,7 @@ const executeAction = async (action: Action) => {
   wsManager.value?.send({
     type: 'result',
     action_id: actionId,
+    message_id: currentMessageId.value,
     success: result.success,
     execution_time: executionTime,
     task: currentTask.value,
@@ -434,6 +436,7 @@ const handleResume = async () => {
   wsManager.value?.send({
     type: 'result',
     action_id: actionId,
+    message_id: currentMessageId.value,
     success: true,
     execution_time: 0,
     task: currentTask.value,
@@ -470,6 +473,7 @@ const handleSend = async (content: string) => {
   let message
   try {
     message = await conversationStore.createMessage(conversationId, content)
+    currentMessageId.value = message.id
     console.log(`[耗时] createMessage: ${Date.now() - t0}ms`)
   } catch (error) {
     console.error('Failed to create message:', error)

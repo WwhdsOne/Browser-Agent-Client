@@ -67,6 +67,7 @@ export interface TaskMessage {
 export interface ResultMessage {
   type: 'result';
   action_id: string;
+  message_id: string;
   success: boolean;
   execution_time: number;
   task: string;
