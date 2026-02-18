@@ -363,8 +363,7 @@ export class BrowserManager {
                 case 'wait':
                     await page.waitForTimeout(action.timeout!)
                     break
-                case 'close_browser':
-                    await this.closeBrowser(conversationId)
+                case 'finish_task':
                     return {success: true}
                 default:
                     return {success: false, error: `Unknown action: ${action.action}`}
