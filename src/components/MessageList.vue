@@ -118,6 +118,7 @@ defineExpose({
   min-height: 0;
   overflow-y: auto;
   padding: 20px;
+  background: var(--bg-primary);
 }
 
 .messages-wrapper {
@@ -134,7 +135,7 @@ defineExpose({
 }
 
 .message-text {
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -147,27 +148,27 @@ defineExpose({
 
 .show-actions {
   font-size: 12px;
-  color: #6b6b6b;
+  color: var(--text-muted);
   cursor: pointer;
   transition: color 0.2s;
 }
 
 .show-actions:hover {
-  color: #007acc;
+  color: var(--accent-color);
 }
 
 .actions-panel {
   margin-top: 12px;
-  background: #1e1e1e;
+  background: var(--bg-secondary);
   border-radius: 6px;
   padding: 12px;
-  border: 1px solid #3e3e3e;
+  border: 1px solid var(--border-color);
 }
 
 .actions-loading,
 .actions-empty {
   font-size: 12px;
-  color: #858585;
+  color: var(--text-secondary);
   text-align: center;
   padding: 10px;
 }
@@ -179,10 +180,10 @@ defineExpose({
 }
 
 .action-item {
-  background: #2d2d2d;
+  background: var(--bg-tertiary);
   border-radius: 4px;
   padding: 8px 12px;
-  border-left: 3px solid #858585;
+  border-left: 3px solid var(--text-secondary);
 }
 
 .action-item.success {
@@ -194,7 +195,7 @@ defineExpose({
 }
 
 .action-item.running {
-  border-left-color: #dcdcaa;
+  border-left-color: var(--warning-text);
 }
 
 .action-header {
@@ -205,12 +206,12 @@ defineExpose({
 }
 
 .action-type {
-  color: #569cd6;
+  color: var(--accent-color);
   font-weight: 500;
 }
 
 .action-status {
-  color: #858585;
+  color: var(--text-secondary);
 }
 
 .action-item.success .action-status {
@@ -222,14 +223,14 @@ defineExpose({
 }
 
 .action-time {
-  color: #858585;
+  color: var(--text-secondary);
   margin-left: auto;
 }
 
 .action-detail {
   margin-top: 6px;
   font-size: 12px;
-  color: #9cdcfe;
+  color: var(--info-text);
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
@@ -239,7 +240,7 @@ defineExpose({
   margin-top: 6px;
   font-size: 12px;
   color: #f14c4c;
-  background: #3c1f1f;
+  background: var(--error-bg);
   padding: 4px 8px;
   border-radius: 3px;
 }

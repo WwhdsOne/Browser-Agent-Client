@@ -346,7 +346,7 @@ export class BrowserManager {
                     await page.goto(action.url!, {waitUntil: 'domcontentloaded'})
                     break
                 case 'click':
-                    await page.click(escapeSelector(action.selector!))
+                    await this.smartClick(page, escapeSelector(action.selector!))
                     await page.waitForLoadState('domcontentloaded')
                     break
                 case 'input':
@@ -424,6 +424,174 @@ export class BrowserManager {
 
         console.log(`[getState] 总计: ${Date.now() - t0}ms`)
         return {url, title, elements}
+    }
+
+    private async smartClick(page: Page, selector: string): Promise<void> {
+        const element = await page.$(selector)
+        if (!element) {
+            throw new Error(`Element not found: ${selector}`)
+        }
+
+        const isInteractiveOption = await element.evaluate((el) => {
+            const tagName = el.tagName.toLowerCase()
+            const inputEl = el as HTMLInputElement
+            const type = inputEl.type?.toLowerCase() || ''
+
+            if (tagName === 'input' && (type === 'radio' || type === 'checkbox')) {
+                return {isOption: true, isHidden: inputEl.offsetParent === null || inputEl.type === 'hidden'}
+            }
+
+            const role = el.getAttribute('role')
+            if (role === 'radio' || role === 'checkbox') {
+                return {isOption: true, isHidden: false}
+            }
+
+            const ariaChecked = el.hasAttribute('aria-checked') || el.hasAttribute('aria-selected')
+            if (ariaChecked) {
+                return {isOption: true, isHidden: false}
+            }
+
+            const className = (el.className || '').toString().toLowerCase()
+            const hasOptionClass = /\b(radio|checkbox|option|choice|select)\b/.test(className)
+            if (hasOptionClass) {
+                return {isOption: true, isHidden: false}
+            }
+
+            return {isOption: false, isHidden: false}
+        })
+
+        if (isInteractiveOption.isOption) {
+            console.log(`[smartClick] 检测到选项类元素: ${selector}`)
+            await this.clickInteractiveOption(page, selector, element, isInteractiveOption.isHidden)
+        } else {
+            console.log(`[smartClick] 普通点击: ${selector}`)
+            await element.click({force: false})
+        }
+    }
+
+    private async clickInteractiveOption(
+        page: Page,
+        selector: string,
+        element: any,
+        isHidden: boolean
+    ): Promise<void> {
+        if (!isHidden) {
+            try {
+                const isVisible = await element.isVisible()
+                if (isVisible) {
+                    console.log(`[smartClick] 策略1: 直接点击可见元素`)
+                    await element.click({force: false})
+                    return
+                }
+            } catch {
+            }
+        }
+
+        console.log(`[smartClick] 策略2: 查找关联 label`)
+        const labelClicked = await page.evaluate((sel) => {
+            const input = document.querySelector(sel)
+            if (!input) return false
+
+            if (input.id) {
+                const label = document.querySelector(`label[for="${input.id}"]`)
+                if (label) {
+                    (label as HTMLElement).click()
+                    return true
+                }
+            }
+
+            const parentLabel = input.closest('label')
+            if (parentLabel) {
+                (parentLabel as HTMLElement).click()
+                return true
+            }
+
+            return false
+        }, selector)
+
+        if (labelClicked) {
+            console.log(`[smartClick] 成功点击关联 label`)
+            return
+        }
+
+        console.log(`[smartClick] 策略3: 点击可见父容器`)
+        const parentClicked = await page.evaluate((sel) => {
+            const input = document.querySelector(sel)
+            if (!input) return false
+
+            let parent = input.parentElement
+            let depth = 0
+            while (parent && depth < 5) {
+                const style = window.getComputedStyle(parent)
+                const isVisible = style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    style.opacity !== '0'
+
+                if (isVisible && (parent as HTMLElement).offsetWidth > 0 && (parent as HTMLElement).offsetHeight > 0) {
+                    const classHint = (parent.className || '').toString().toLowerCase()
+                    const hasHint = /\b(radio|checkbox|option|choice|item|container|wrapper)\b/.test(classHint)
+
+                    if (hasHint || parent.getAttribute('role')) {
+                        (parent as HTMLElement).click()
+                        return true
+                    }
+                }
+
+                parent = parent.parentElement
+                depth++
+            }
+
+            return false
+        }, selector)
+
+        if (parentClicked) {
+            console.log(`[smartClick] 成功点击父容器`)
+            return
+        }
+
+        console.log(`[smartClick] 策略4: 查找相邻可见元素`)
+        const siblingClicked = await page.evaluate((sel) => {
+            const input = document.querySelector(sel)
+            if (!input) return false
+
+            const siblings = input.parentElement?.children
+            if (!siblings) return false
+
+            for (const sibling of Array.from(siblings)) {
+                if (sibling === input) continue
+
+                const htmlSibling = sibling as HTMLElement
+                if (htmlSibling.offsetWidth === 0 || htmlSibling.offsetHeight === 0) continue
+
+                const style = window.getComputedStyle(sibling)
+                if (style.display === 'none' || style.visibility === 'hidden') continue
+
+                const classHint = (sibling.className || '').toString().toLowerCase()
+                if (/\b(label|text|box|indicator|mark)\b/.test(classHint)) {
+                    htmlSibling.click()
+                    return true
+                }
+            }
+
+            return false
+        }, selector)
+
+        if (siblingClicked) {
+            console.log(`[smartClick] 成功点击相邻元素`)
+            return
+        }
+
+        console.log(`[smartClick] 策略5: JavaScript 触发点击事件`)
+        await page.evaluate((sel) => {
+            const el = document.querySelector(sel)
+            if (el) {
+                el.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                }))
+            }
+        }, selector)
     }
 
     private async extractPageElements(page: Page): Promise<PageElement[]> {
@@ -676,8 +844,6 @@ export class BrowserManager {
             const loginSelectors = [
                 'input[type="password"]',
                 'input[type="email"][name*="login"]',
-                'input[placeholder*="手机"]',
-                'input[placeholder*="邮箱"]',
                 'input[placeholder*="账号"]',
                 'input[placeholder*="用户名"]',
                 '.login-form',
@@ -705,10 +871,8 @@ export class BrowserManager {
             const loginKeywords = [
                 '登录',
                 '账号登录',
-                '手机号登录',
                 '扫码登录',
                 '密码登录',
-                '登录',
                 '注册',
                 'sign in',
                 'log in',

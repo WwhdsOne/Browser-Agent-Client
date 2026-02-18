@@ -111,11 +111,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
 }
 
 .login-box {
-  background: #2d2d2d;
+  background: var(--bg-secondary);
   padding: 40px;
   border-radius: 8px;
   width: 400px;
@@ -126,7 +126,7 @@ h1 {
   text-align: center;
   margin-bottom: 30px;
   font-size: 24px;
-  color: #d4d4d4;
+  color: var(--text-primary);
 }
 
 .form-group {
@@ -137,17 +137,18 @@ input[type="text"],
 input[type="password"] {
   width: 100%;
   padding: 12px;
-  background: #1e1e1e;
-  border: 1px solid #3e3e3e;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 14px;
+  transition: border-color 0.2s;
 }
 
 input[type="text"]:focus,
 input[type="password"]:focus {
   outline: none;
-  border-color: #007acc;
+  border-color: var(--accent-color);
 }
 
 .form-options {
@@ -160,7 +161,7 @@ input[type="password"]:focus {
   gap: 8px;
   cursor: pointer;
   font-size: 13px;
-  color: #858585;
+  color: var(--text-secondary);
 }
 
 .remember-me input[type="checkbox"] {
@@ -168,13 +169,13 @@ input[type="password"]:focus {
 }
 
 .remember-me:hover {
-  color: #d4d4d4;
+  color: var(--text-primary);
 }
 
 button {
   width: 100%;
   padding: 12px;
-  background: #007acc;
+  background: var(--accent-color);
   border: none;
   border-radius: 4px;
   color: white;
@@ -184,16 +185,16 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: #005a9e;
+  background: var(--accent-hover);
 }
 
 button:disabled {
-  background: #3e3e3e;
+  background: var(--bg-tertiary);
   cursor: not-allowed;
 }
 
 .error {
-  color: #f48771;
+  color: var(--error-text);
   margin-top: 10px;
   text-align: center;
 }
@@ -202,11 +203,11 @@ button:disabled {
   margin-top: 20px;
   text-align: center;
   font-size: 13px;
-  color: #858585;
+  color: var(--text-secondary);
 }
 
 .register-link a {
-  color: #007acc;
+  color: var(--accent-color);
   text-decoration: none;
   margin-left: 4px;
 }

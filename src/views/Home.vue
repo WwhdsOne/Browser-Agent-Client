@@ -3,7 +3,12 @@
     <div class="sidebar">
       <div class="sidebar-header">
         <h2>会话列表</h2>
-        <button @click="showCreateModal = true" class="new-btn">新建会话</button>
+        <div class="header-actions">
+          <button @click="themeStore.toggleTheme()" class="theme-btn" :title="themeStore.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'">
+            {{ themeStore.theme === 'dark' ? '☀️' : '🌙' }}
+          </button>
+          <button @click="showCreateModal = true" class="new-btn">新建会话</button>
+        </div>
       </div>
       <ConversationList
         :conversations="conversationStore.conversations"
@@ -25,7 +30,18 @@
               {{ pauseReason === 'login' ? '检测到登录页面，请手动登录后点击继续' : '任务已暂停' }}
             </span>
           </div>
-          <button class="resume-btn" @click="handleResume">继续执行</button>
+          <div class="pause-actions">
+            <button class="resume-btn" @click="handleResume">继续执行</button>
+            <button class="stop-btn" @click="handleStop">终止任务</button>
+          </div>
+        </div>
+        
+        <div v-else-if="isExecuting" class="executing-banner">
+          <div class="pause-content">
+            <span class="pause-icon">⏳</span>
+            <span class="pause-text">任务执行中...</span>
+          </div>
+          <button class="stop-btn" @click="handleStop">终止任务</button>
         </div>
         
         <ChatInput @send="handleSend" />
@@ -128,6 +144,7 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useConversationStore } from '@/stores/conversation'
 import { useBrowserStore } from '@/stores/browser'
+import { useThemeStore } from '@/stores/theme'
 import { WebSocketManager } from '@/utils/websocket'
 import type { ServerMessage, Action } from '@/types'
 import ConversationList from '@/components/ConversationList.vue'
@@ -139,6 +156,7 @@ const router = useRouter()
 const userStore = useUserStore()
 const conversationStore = useConversationStore()
 const browserStore = useBrowserStore()
+const themeStore = useThemeStore()
 
 const wsManager = ref<WebSocketManager | null>(null)
 const messageListRef = ref<{ refreshExpandedActions: () => Promise<void> } | null>(null)
@@ -154,6 +172,8 @@ const pauseReason = ref('')
 const pendingActionId = ref('')
 const currentTask = ref('')
 const currentMessageId = ref('')
+const isExecuting = ref(false)
+const confirmedLoginUrls = ref<Set<string>>(new Set())
 let currentWSConversationId: string | null = null
 
 const currentMessages = computed(() => {
@@ -277,28 +297,31 @@ const selectConversation = async (conversationId: string) => {
   const conversation = conversationStore.conversations.find(c => c.id === conversationId)
   if (!conversation) return
   
-  await conversationStore.selectConversation(conversationId)
+  confirmedLoginUrls.value.clear()
   
-  let browserInstance = browserStore.getBrowser(conversationId)
-  if (!browserInstance) {
-    let browserResult
+  // 关闭当前所有浏览器实例
+  await browserStore.closeAllBrowsers()
+  
+  let browserResult
+  
+  if (conversation.browser_type === 'existing') {
+    const chromeInfo = await window.electronAPI.chrome.getDefaultPath()
     
-    if (conversation.browser_type === 'existing') {
-      const chromeInfo = await window.electronAPI.chrome.getDefaultPath()
-      
-      if (chromeInfo.found && chromeInfo.path) {
-        browserResult = await browserStore.connectOrLaunchBrowser(chromeInfo.path, conversationId)
-      } else {
-        browserResult = { success: false, error: '未找到 Chrome 浏览器，请先手动配置' }
-      }
+    if (chromeInfo.found && chromeInfo.path) {
+      browserResult = await browserStore.connectOrLaunchBrowser(chromeInfo.path, conversationId)
     } else {
-      browserResult = await browserStore.createBrowser(conversationId)
+      browserResult = { success: false, error: '未找到 Chrome 浏览器' }
     }
-    
-    if (!browserResult.success) {
-      errorMessage.value = browserResult.error || '浏览器连接失败'
-    }
+  } else {
+    browserResult = await browserStore.createBrowser(conversationId)
   }
+  
+  if (!browserResult.success) {
+    errorMessage.value = browserResult.error || '浏览器启动失败'
+    return
+  }
+  
+  await conversationStore.selectConversation(conversationId)
 }
 
 const handleRename = async (id: string, title: string) => {
@@ -335,9 +358,13 @@ const handleWSMessage = async (message: ServerMessage) => {
       }
       break
     case 'finish':
+      isExecuting.value = false
+      currentTask.value = ''
+      currentMessageId.value = ''
       break
     case 'error':
       console.error('WebSocket error:', message.message)
+      isExecuting.value = false
       break
   }
 }
@@ -345,6 +372,7 @@ const handleWSMessage = async (message: ServerMessage) => {
 const executeAction = async (action: Action) => {
   if (!conversationStore.currentConversation) return
   
+  isExecuting.value = true
   const conversation = conversationStore.currentConversation
   const conversationId = conversation.id
   const actionId = action.action_id
@@ -379,12 +407,18 @@ const executeAction = async (action: Action) => {
   
   const executionTime = Date.now() - startTime
   
-  const isLoginPage = await window.electronAPI.browser.detectLogin(conversationId)
-  if (isLoginPage) {
-    isPaused.value = true
-    pauseReason.value = 'login'
-    pendingActionId.value = actionId
-    return
+  const pageState = result.pageState
+  const currentUrl = pageState?.url || ''
+  
+  if (!confirmedLoginUrls.value.has(currentUrl)) {
+    const isLoginPage = await window.electronAPI.browser.detectLogin(conversationId)
+    if (isLoginPage) {
+      isPaused.value = true
+      pauseReason.value = 'login'
+      pendingActionId.value = actionId
+      isExecuting.value = false
+      return
+    }
   }
   
   wsManager.value?.send({
@@ -395,10 +429,11 @@ const executeAction = async (action: Action) => {
     execution_time: executionTime,
     task: currentTask.value,
     error: result.error,
-    pageState: result.pageState
+    pageState
   })
   
   await messageListRef.value?.refreshExpandedActions()
+  isExecuting.value = false
 }
 
 const handleResume = async () => {
@@ -411,8 +446,13 @@ const handleResume = async () => {
   isPaused.value = false
   pauseReason.value = ''
   pendingActionId.value = ''
+  isExecuting.value = true
   
   let pageState = await window.electronAPI.browser.getState(conversationId)
+  
+  if (pageState?.url) {
+    confirmedLoginUrls.value.add(pageState.url)
+  }
   
   if (!pageState || !pageState.url) {
     console.log('浏览器不可用，尝试重新启动...')
@@ -444,6 +484,22 @@ const handleResume = async () => {
   })
   
   await messageListRef.value?.refreshExpandedActions()
+  isExecuting.value = false
+}
+
+const handleStop = () => {
+  if (wsManager.value) {
+    wsManager.value.disconnect()
+    wsManager.value = null
+    currentWSConversationId = null
+  }
+  
+  isPaused.value = false
+  pauseReason.value = ''
+  pendingActionId.value = ''
+  currentTask.value = ''
+  currentMessageId.value = ''
+  isExecuting.value = false
 }
 
 const ensureWSConnected = async (conversationId: string): Promise<void> => {
@@ -469,6 +525,7 @@ const handleSend = async (content: string) => {
   const t0 = Date.now()
   
   currentTask.value = content
+  isExecuting.value = true
   
   let message
   try {
@@ -477,6 +534,7 @@ const handleSend = async (content: string) => {
     console.log(`[耗时] createMessage: ${Date.now() - t0}ms`)
   } catch (error) {
     console.error('Failed to create message:', error)
+    isExecuting.value = false
     return
   }
   
@@ -499,6 +557,7 @@ const handleSend = async (content: string) => {
         browserResult = await browserStore.connectOrLaunchBrowser(chromeInfo.path, conversationId)
       } else {
         errorMessage.value = '未找到 Chrome 浏览器'
+        isExecuting.value = false
         return
       }
     } else {
@@ -507,6 +566,7 @@ const handleSend = async (content: string) => {
     
     if (!browserResult.success) {
       errorMessage.value = browserResult.error || '浏览器启动失败'
+      isExecuting.value = false
       return
     }
     
@@ -552,12 +612,13 @@ onBeforeUnmount(() => {
   height: 100vh;
   overflow: hidden;
   position: relative;
+  background: var(--bg-primary);
 }
 
 .sidebar {
   width: 280px;
-  background: #252526;
-  border-right: 1px solid #3e3e3e;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -565,19 +626,38 @@ onBeforeUnmount(() => {
 
 .sidebar-header {
   padding: 20px;
-  border-bottom: 1px solid #3e3e3e;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .sidebar-header h2 {
   font-size: 16px;
   margin-bottom: 12px;
-  color: #d4d4d4;
+  color: var(--text-primary);
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.theme-btn {
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background 0.2s;
+}
+
+.theme-btn:hover {
+  background: var(--bg-hover);
 }
 
 .new-btn {
-  width: 100%;
+  flex: 1;
   padding: 8px;
-  background: #0e639c;
+  background: var(--accent-color);
   border: none;
   border-radius: 4px;
   color: white;
@@ -586,7 +666,7 @@ onBeforeUnmount(() => {
 }
 
 .new-btn:hover {
-  background: #1177bb;
+  background: var(--accent-hover);
 }
 
 .main-content {
@@ -595,6 +675,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg-primary);
 }
 
 .chat-container {
@@ -609,7 +690,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #858585;
+  color: var(--text-secondary);
 }
 
 .modal-overlay {
@@ -626,22 +707,22 @@ onBeforeUnmount(() => {
 }
 
 .modal-content {
-  background: #2d2d2d;
+  background: var(--bg-secondary);
   border-radius: 8px;
   padding: 24px;
   width: 400px;
-  border: 1px solid #3e3e3e;
+  border: 1px solid var(--border-color);
 }
 
 .modal-content h3 {
   margin: 0 0 8px 0;
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 18px;
 }
 
 .modal-desc {
   margin: 0 0 20px 0;
-  color: #858585;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -653,8 +734,8 @@ onBeforeUnmount(() => {
 }
 
 .option-btn {
-  background: #1e1e1e;
-  border: 1px solid #3e3e3e;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 6px;
   padding: 16px;
   cursor: pointer;
@@ -664,24 +745,23 @@ onBeforeUnmount(() => {
 }
 
 .option-btn:hover {
-  border-color: #007acc;
+  border-color: var(--accent-color);
 }
 
 .option-btn.recommended {
-  background: #1a2e1a;
-  border-color: #2d5a2d;
+  background: var(--success-bg);
+  border-color: var(--success-border);
 }
 
 .option-btn.recommended:hover {
-  border-color: #3d7a3d;
-  background: #1f3a1f;
+  border-color: var(--success-text);
 }
 
 .recommend-badge {
   position: absolute;
   top: -8px;
   right: 12px;
-  background: #2d8a2d;
+  background: var(--success-text);
   color: white;
   font-size: 11px;
   font-weight: 500;
@@ -695,44 +775,44 @@ onBeforeUnmount(() => {
 }
 
 .option-title {
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 500;
   margin-bottom: 4px;
 }
 
 .option-desc {
-  color: #858585;
+  color: var(--text-secondary);
   font-size: 12px;
   margin-bottom: 8px;
 }
 
 .option-note {
-  color: #6b6b6b;
+  color: var(--text-muted);
   font-size: 11px;
   padding-top: 8px;
-  border-top: 1px solid #3e3e3e;
+  border-top: 1px solid var(--border-color);
 }
 
 .option-btn.recommended .option-note {
-  color: #5a9a5a;
-  border-top-color: #2d5a2d;
+  color: var(--success-text);
+  border-top-color: var(--success-border);
 }
 
 .cancel-btn {
   width: 100%;
   padding: 10px;
   background: transparent;
-  border: 1px solid #3e3e3e;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #858585;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .cancel-btn:hover {
-  background: #3e3e3e;
-  color: #d4d4d4;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .pause-banner {
@@ -740,8 +820,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  background: #4d3800;
-  border-top: 1px solid #6d5a00;
+  background: var(--warning-bg);
+  border-top: 1px solid var(--warning-border);
 }
 
 .pause-content {
@@ -755,16 +835,16 @@ onBeforeUnmount(() => {
 }
 
 .pause-text {
-  color: #dcdcaa;
+  color: var(--warning-text);
   font-size: 13px;
 }
 
 .resume-btn {
   padding: 8px 16px;
-  background: #dcdcaa;
+  background: var(--warning-text);
   border: none;
   border-radius: 4px;
-  color: #1e1e1e;
+  color: var(--bg-primary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -772,10 +852,49 @@ onBeforeUnmount(() => {
 }
 
 .resume-btn:hover {
-  background: #e2e0a0;
+  opacity: 0.9;
 }
 
-/* Chrome modal styles */
+.pause-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.stop-btn {
+  padding: 8px 16px;
+  background: var(--error-bg);
+  border: none;
+  border-radius: 4px;
+  color: var(--error-text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.stop-btn:hover {
+  opacity: 0.9;
+}
+
+.executing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--info-bg);
+  border-top: 1px solid var(--info-border);
+}
+
+.executing-banner .pause-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.executing-banner .pause-text {
+  color: var(--info-text);
+}
+
 .chrome-modal {
   width: 480px;
 }
@@ -790,8 +909,8 @@ onBeforeUnmount(() => {
 .spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid #3e3e3e;
-  border-top-color: #007acc;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent-color);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -802,7 +921,7 @@ onBeforeUnmount(() => {
 
 .chrome-checking p {
   margin-top: 16px;
-  color: #858585;
+  color: var(--text-secondary);
 }
 
 .chrome-found, .chrome-notfound, .chrome-invalid {
@@ -810,33 +929,33 @@ onBeforeUnmount(() => {
 }
 
 .chrome-path-info {
-  background: #1e1e1e;
+  background: var(--bg-primary);
   padding: 12px;
   border-radius: 4px;
   margin-bottom: 12px;
 }
 
 .chrome-path-info .label {
-  color: #858585;
+  color: var(--text-secondary);
   font-size: 12px;
   display: block;
   margin-bottom: 4px;
 }
 
 .chrome-path-info .path {
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 13px;
   word-break: break-all;
 }
 
 .chrome-hint {
-  color: #858585;
+  color: var(--text-secondary);
   font-size: 13px;
   margin: 0 0 16px 0;
 }
 
 .error-text {
-  color: #f48771;
+  color: var(--error-text);
   font-size: 13px;
   margin: 0 0 8px 0;
 }
@@ -850,30 +969,30 @@ onBeforeUnmount(() => {
 .chrome-path-input input {
   flex: 1;
   padding: 8px 12px;
-  background: #1e1e1e;
-  border: 1px solid #3e3e3e;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 13px;
 }
 
 .chrome-path-input input:focus {
   outline: none;
-  border-color: #007acc;
+  border-color: var(--accent-color);
 }
 
 .browse-btn {
   padding: 8px 16px;
-  background: #3e3e3e;
+  background: var(--bg-tertiary);
   border: none;
   border-radius: 4px;
-  color: #d4d4d4;
+  color: var(--text-primary);
   cursor: pointer;
   font-size: 13px;
 }
 
 .browse-btn:hover {
-  background: #4e4e4e;
+  background: var(--bg-hover);
 }
 
 .chrome-actions {
@@ -884,7 +1003,7 @@ onBeforeUnmount(() => {
 
 .primary-btn {
   padding: 10px 20px;
-  background: #0e639c;
+  background: var(--accent-color);
   border: none;
   border-radius: 4px;
   color: white;
@@ -893,27 +1012,27 @@ onBeforeUnmount(() => {
 }
 
 .primary-btn:hover:not(:disabled) {
-  background: #1177bb;
+  background: var(--accent-hover);
 }
 
 .primary-btn:disabled {
-  background: #3e3e3e;
+  background: var(--bg-tertiary);
   cursor: not-allowed;
 }
 
 .secondary-btn {
   padding: 10px 20px;
   background: transparent;
-  border: 1px solid #3e3e3e;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #858585;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 14px;
 }
 
 .secondary-btn:hover {
-  background: #3e3e3e;
-  color: #d4d4d4;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .error-toast {
@@ -921,8 +1040,8 @@ onBeforeUnmount(() => {
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
-  background: #5a1d1d;
-  color: #f48771;
+  background: var(--error-bg);
+  color: var(--error-text);
   padding: 12px 20px;
   border-radius: 6px;
   display: flex;
@@ -934,7 +1053,7 @@ onBeforeUnmount(() => {
 .error-toast button {
   background: transparent;
   border: none;
-  color: #f48771;
+  color: var(--error-text);
   cursor: pointer;
   font-size: 18px;
   padding: 0;

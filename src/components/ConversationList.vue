@@ -1,5 +1,4 @@
 <template>
-  <!-- 模板部分保持不变 -->
   <div class="conversation-list">
     <div v-if="groupedConversations.length === 0" class="empty-list">
       <span>暂无会话</span>
@@ -71,21 +70,15 @@ const editingId = ref<string | null>(null)
 const editTitle = ref('')
 const editInput = ref<HTMLInputElement | null>(null)
 
-// 修复核心：统一基于 UTC 时间计算，避免时区偏差
 const groupedConversations = computed(() => {
   const groups: ConversationGroup[] = []
   const now = new Date()
 
-  // 1. 计算基准时间（基于 UTC 时间，避免时区问题）
-  // 今天 00:00:00 UTC
   const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-  // 昨天 00:00:00 UTC
   const yesterdayUTC = new Date(todayUTC)
   yesterdayUTC.setUTCDate(yesterdayUTC.getUTCDate() - 1)
-  // 7天前 00:00:00 UTC
   const weekAgoUTC = new Date(todayUTC)
   weekAgoUTC.setUTCDate(weekAgoUTC.getUTCDate() - 7)
-  // 本月第一天 00:00:00 UTC（修复「本月」计算错误）
   const monthStartUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
 
   const todayItems: Conversation[] = []
@@ -95,7 +88,6 @@ const groupedConversations = computed(() => {
   const olderItems: Conversation[] = []
 
   props.conversations.forEach(conv => {
-    // 2. 解析会话时间（兼容 UTC 时间字符串）
     const timeStr = conv.created_at
     if (!timeStr) {
       olderItems.push(conv)
@@ -108,14 +100,12 @@ const groupedConversations = computed(() => {
       return
     }
 
-    // 3. 转为 UTC 日期（只保留年月日，重置时分秒）
     const convDateUTC = new Date(Date.UTC(
         convDate.getUTCFullYear(),
         convDate.getUTCMonth(),
         convDate.getUTCDate()
     ))
 
-    // 4. 基于 UTC 时间对比，避免时区偏差
     if (convDateUTC >= todayUTC) {
       todayItems.push(conv)
     } else if (convDateUTC >= yesterdayUTC) {
@@ -129,7 +119,6 @@ const groupedConversations = computed(() => {
     }
   })
 
-  // 按顺序添加分组（保证显示顺序）
   if (todayItems.length > 0) {
     groups.push({label: '今天', items: todayItems})
   }
@@ -177,7 +166,6 @@ const handleDelete = (id: string) => {
 </script>
 
 <style scoped>
-/* 样式部分保持不变 */
 .conversation-list {
   flex: 1;
   overflow-y: auto;
@@ -187,7 +175,7 @@ const handleDelete = (id: string) => {
 .empty-list {
   padding: 20px;
   text-align: center;
-  color: #858585;
+  color: var(--text-secondary);
   font-size: 14px;
 }
 
@@ -198,7 +186,7 @@ const handleDelete = (id: string) => {
 .group-label {
   padding: 8px 12px 4px 12px;
   font-size: 12px;
-  color: #858585;
+  color: var(--text-secondary);
   font-weight: 500;
 }
 
@@ -213,11 +201,11 @@ const handleDelete = (id: string) => {
 }
 
 .conversation-item:hover {
-  background: #2d2d2d;
+  background: var(--bg-secondary);
 }
 
 .conversation-item.active {
-  background: #37373d;
+  background: var(--bg-tertiary);
 }
 
 .conversation-content {
@@ -229,7 +217,7 @@ const handleDelete = (id: string) => {
 
 .conversation-title {
   font-size: 14px;
-  color: #d4d4d4;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -241,8 +229,8 @@ const handleDelete = (id: string) => {
 
 .browser-type {
   font-size: 11px;
-  color: #6b6b6b;
-  background: #2d2d2d;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
   padding: 1px 6px;
   border-radius: 3px;
 }
@@ -254,10 +242,10 @@ const handleDelete = (id: string) => {
 .edit-input-wrapper input {
   width: 100%;
   padding: 4px 8px;
-  background: #1e1e1e;
-  border: 1px solid #007acc;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent-color);
   border-radius: 4px;
-  color: #d4d4d4;
+  color: var(--text-primary);
   font-size: 14px;
 }
 
@@ -280,7 +268,7 @@ const handleDelete = (id: string) => {
   background: transparent;
   border: none;
   border-radius: 4px;
-  color: #858585;
+  color: var(--text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -288,11 +276,11 @@ const handleDelete = (id: string) => {
 }
 
 .action-btn:hover {
-  background: #3e3e3e;
-  color: #d4d4d4;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .action-btn.delete:hover {
-  color: #f48771;
+  color: var(--error-text);
 }
 </style>
