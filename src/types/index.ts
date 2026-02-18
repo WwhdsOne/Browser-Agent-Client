@@ -34,10 +34,19 @@ export interface Message {
   created_at: string
 }
 
+export interface ScrollInfo {
+  scrollHeight: number;
+  clientHeight: number;
+  scrollTop: number;
+  hasMoreBelow: boolean;
+  hasMoreAbove: boolean;
+}
+
 export interface PageState {
   url: string;
   title: string;
   elements: PageElement[];
+  scrollInfo?: ScrollInfo;
 }
 
 export interface PageElement {

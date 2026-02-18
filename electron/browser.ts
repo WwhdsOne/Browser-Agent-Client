@@ -14,10 +14,19 @@ export interface PageElement {
     value?: string
 }
 
+export interface ScrollInfo {
+    scrollHeight: number
+    clientHeight: number
+    scrollTop: number
+    hasMoreBelow: boolean
+    hasMoreAbove: boolean
+}
+
 export interface PageState {
     url: string
     title: string
     elements: PageElement[]
+    scrollInfo?: ScrollInfo
 }
 
 export interface Action {
@@ -421,8 +430,25 @@ export class BrowserManager {
         const elements = await this.extractPageElements(page)
         console.log(`[getState] extractPageElements: ${Date.now() - t2}ms`)
 
+        const t3 = Date.now()
+        const scrollInfo = await page.evaluate(() => {
+            const doc = document.documentElement
+            const scrollHeight = doc.scrollHeight
+            const clientHeight = doc.clientHeight
+            const scrollTop = window.scrollY
+
+            return {
+                scrollHeight,
+                clientHeight,
+                scrollTop,
+                hasMoreBelow: scrollTop + clientHeight < scrollHeight - 10,
+                hasMoreAbove: scrollTop > 10
+            }
+        })
+        console.log(`[getState] scrollInfo: ${Date.now() - t3}ms`)
+
         console.log(`[getState] 总计: ${Date.now() - t0}ms`)
-        return {url, title, elements}
+        return {url, title, elements, scrollInfo}
     }
 
     private async smartClick(page: Page, selector: string): Promise<void> {
