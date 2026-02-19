@@ -12,6 +12,14 @@ export interface PageElement {
     text: string
     selector: string
     value?: string
+    type?: string
+    label?: string
+    position?: {
+        x: number
+        y: number
+        width: number
+        height: number
+    }
 }
 
 export interface ScrollInfo {
@@ -31,7 +39,7 @@ export interface PageState {
 
 export interface Action {
     action_id: string
-    action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser'
+    action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser' | 'finish_task'
     selector?: string
     value?: string
     url?: string
@@ -378,26 +386,20 @@ export class BrowserManager {
                     return {success: false, error: `Unknown action: ${action.action}`}
             }
 
-            // 等待页面操作稳定
             await page.waitForTimeout(2000)
 
             const pagesAfter = context.pages()
 
-            // 如果当前打开页面超过 1 个
             if (pagesAfter.length > 1) {
-                // 保留最新页面（数组最后一个）
                 const newPage = pagesAfter[pagesAfter.length - 1]
 
-                // 关闭其他所有页面
                 for (const p of pagesAfter) {
                     if (p !== newPage && !p.isClosed()) {
                         console.log(`[关闭旧页面] ${p.url()}`)
-                        await p.close().catch(() => {
-                        }) // 避免报错
+                        await p.close().catch(() => {})
                     }
                 }
 
-                // 更新浏览器记录，保留最新页面
                 this.browsers.set(conversationId, {browser, page: newPage, isExisting: instance.isExisting})
                 console.log(`[保留新页面] ${newPage.url()}`)
             }
@@ -623,12 +625,25 @@ export class BrowserManager {
         const result = await page.evaluate(() => {
             const viewportHeight = window.innerHeight
             const viewportWidth = window.innerWidth
-            const items: Array<{
+            const items: PageElement[] = []
+
+            interface ElementInfo {
+                element: Element
                 tag: string
-                text: string
+                type?: string
                 selector: string
+                rect: DOMRect
+                centerX: number
+                centerY: number
                 value?: string
-            }> = []
+            }
+
+            interface TextInfo {
+                text: string
+                rect: DOMRect
+                centerX: number
+                centerY: number
+            }
 
             const generateSelector = (el: Element): string | null => {
                 if (el.id) return `#${el.id}`
@@ -662,8 +677,7 @@ export class BrowserManager {
                 return null
             }
 
-            const isInViewport = (el: Element): boolean => {
-                const rect = el.getBoundingClientRect()
+            const isInViewport = (rect: DOMRect): boolean => {
                 return (
                     rect.top < viewportHeight &&
                     rect.bottom > 0 &&
@@ -683,64 +697,249 @@ export class BrowserManager {
                 return true
             }
 
-            const selectors = [
-                'button:not([disabled])',
-                'a[href]:not([href=""])',
+            const distance = (a: { centerX: number; centerY: number }, b: { centerX: number; centerY: number }): number => {
+                return Math.sqrt(
+                    Math.pow(a.centerX - b.centerX, 2) +
+                    Math.pow(a.centerY - b.centerY, 2)
+                )
+            }
+
+            const findLabelAbove = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
+                const candidates = texts.filter(t =>
+                    t.centerY < input.centerY &&
+                    (input.centerY - t.centerY) < 150
+                )
+
+                if (candidates.length === 0) return null
+
+                candidates.sort((a, b) =>
+                    (input.centerY - a.centerY) - (input.centerY - b.centerY)
+                )
+
+                return candidates[0]
+            }
+
+            const findLabelLeft = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
+                const candidates = texts.filter(t =>
+                    Math.abs(t.centerY - input.centerY) < 30 &&
+                    t.centerX < input.centerX
+                )
+
+                if (candidates.length === 0) return null
+
+                candidates.sort((a, b) =>
+                    (input.centerX - a.centerX) - (input.centerX - b.centerX)
+                )
+
+                return candidates[0]
+            }
+
+            const findNearest = (input: ElementInfo, texts: TextInfo[], maxDist: number = 200): TextInfo | null => {
+                const candidates = texts
+                    .map(t => ({ ...t, dist: distance(input, t) }))
+                    .filter(t => t.dist < maxDist)
+                    .sort((a, b) => a.dist - b.dist)
+
+                return candidates[0] || null
+            }
+
+            const findLabelInContainer = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
+                const containerClasses = ['question', 'form-item', 'form-group', 'field', 'input-group']
+                const el = input.element
+
+                for (const cls of containerClasses) {
+                    const container = el.closest(`[class*="${cls}"]`)
+                    if (container) {
+                        const containerRect = container.getBoundingClientRect()
+                        const containerTexts = texts.filter(t =>
+                            t.rect.top >= containerRect.top &&
+                            t.rect.bottom <= containerRect.bottom &&
+                            t.rect.left >= containerRect.left &&
+                            t.rect.right <= containerRect.right
+                        )
+
+                        if (containerTexts.length > 0) {
+                            return findLabelAbove(input, containerTexts) || findLabelLeft(input, containerTexts)
+                        }
+                    }
+                }
+
+                return null
+            }
+
+            const inputSelectors = [
                 'input:not([type="hidden"]):not([disabled])',
                 'textarea:not([disabled])',
-                'select:not([disabled])',
+                'select:not([disabled])'
+            ]
+
+            const actionSelectors = [
+                'button:not([disabled])',
+                'a[href]:not([href=""])',
                 '[role="button"]:not([disabled])',
                 '[onclick]:not([disabled])'
             ]
 
-            const seen = new Set<string>()
+            const inputElements: ElementInfo[] = []
+            const actionElements: ElementInfo[] = []
+            const seenSelectors = new Set<string>()
 
-            for (const selector of selectors) {
-                try {
-                    const nodes = document.querySelectorAll(selector)
-                    nodes.forEach((el) => {
-                        if (!isInViewport(el)) return
-                        if (!isInteractable(el)) return
+            for (const selector of inputSelectors) {
+                const nodes = document.querySelectorAll(selector)
+                nodes.forEach((el) => {
+                    const rect = el.getBoundingClientRect()
+                    if (!isInViewport(rect) || !isInteractable(el)) return
 
-                        const elementSelector = generateSelector(el)
-                        if (!elementSelector) return
-                        if (elementSelector.length > 100) return
-                        if (seen.has(elementSelector)) return
-                        seen.add(elementSelector)
+                    const elementSelector = generateSelector(el)
+                    if (!elementSelector || elementSelector.length > 100) return
+                    if (seenSelectors.has(elementSelector)) return
+                    seenSelectors.add(elementSelector)
 
-                        const tagName = el.tagName.toLowerCase()
-                        const isInputElement = tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+                    const tagName = el.tagName.toLowerCase()
+                    const inputEl = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
 
-                        let text = ''
-                        let value: string | undefined = undefined
+                    let value: string | undefined
+                    if (tagName === 'select') {
+                        value = (el as HTMLSelectElement).value || ''
+                    } else {
+                        value = (inputEl as HTMLInputElement | HTMLTextAreaElement).value || ''
+                    }
 
-                        if (isInputElement) {
-                            if (tagName === 'select') {
-                                const selectEl = el as HTMLSelectElement
-                                value = selectEl.value || ''
-                                const selectedOption = selectEl.options[selectEl.selectedIndex]
-                                text = selectedOption ? selectedOption.text : ''
-                            } else {
-                                const inputEl = el as HTMLInputElement | HTMLTextAreaElement
-                                value = inputEl.value || ''
-                                text = (inputEl as HTMLInputElement).placeholder || el.getAttribute('aria-label') || ''
-                            }
-                        } else {
-                            text = (el.textContent || '').trim()
-                        }
-
-                        if (!text && !isInputElement) return
-
-                        items.push({
-                            tag: tagName,
-                            text,
-                            selector: elementSelector,
-                            ...(value ? {value} : {})
-                        })
+                    inputElements.push({
+                        element: el,
+                        tag: tagName,
+                        type: (inputEl as HTMLInputElement).type || tagName,
+                        selector: elementSelector,
+                        rect,
+                        centerX: rect.x + rect.width / 2,
+                        centerY: rect.y + rect.height / 2,
+                        value
                     })
-                } catch {
-                }
+                })
             }
+
+            for (const selector of actionSelectors) {
+                const nodes = document.querySelectorAll(selector)
+                nodes.forEach((el) => {
+                    const rect = el.getBoundingClientRect()
+                    if (!isInViewport(rect) || !isInteractable(el)) return
+
+                    const elementSelector = generateSelector(el)
+                    if (!elementSelector || elementSelector.length > 100) return
+                    if (seenSelectors.has(elementSelector)) return
+                    seenSelectors.add(elementSelector)
+
+                    actionElements.push({
+                        element: el,
+                        tag: el.tagName.toLowerCase(),
+                        selector: elementSelector,
+                        rect,
+                        centerX: rect.x + rect.width / 2,
+                        centerY: rect.y + rect.height / 2
+                    })
+                })
+            }
+
+            const textNodes: TextInfo[] = []
+            const textElements = document.querySelectorAll('label, p, span, div, h1, h2, h3, h4, h5, h6, td, th, li')
+
+            textElements.forEach((el) => {
+                const text = (el.textContent || '').trim()
+                if (!text || text.length === 0 || text.length > 100) return
+
+                const rect = el.getBoundingClientRect()
+                if (!isInViewport(rect)) return
+
+                const style = window.getComputedStyle(el)
+                if (style.display === 'none' || style.visibility === 'hidden') return
+
+                textNodes.push({
+                    text,
+                    rect,
+                    centerX: rect.x + rect.width / 2,
+                    centerY: rect.y + rect.height / 2
+                })
+            })
+
+            const seenTexts = new Set<string>()
+            const uniqueTexts = textNodes.filter(t => {
+                if (seenTexts.has(t.text)) return false
+                seenTexts.add(t.text)
+                return true
+            })
+
+            for (const input of inputElements) {
+                let labelText = ''
+                let displayText = ''
+
+                const containerLabel = findLabelInContainer(input, uniqueTexts)
+                if (containerLabel) {
+                    labelText = containerLabel.text
+                } else {
+                    const aboveLabel = findLabelAbove(input, uniqueTexts)
+                    if (aboveLabel) {
+                        labelText = aboveLabel.text
+                    } else {
+                        const leftLabel = findLabelLeft(input, uniqueTexts)
+                        if (leftLabel) {
+                            labelText = leftLabel.text
+                        } else {
+                            const nearestLabel = findNearest(input, uniqueTexts)
+                            if (nearestLabel) {
+                                labelText = nearestLabel.text
+                            }
+                        }
+                    }
+                }
+
+                const inputEl = input.element as HTMLInputElement | HTMLTextAreaElement
+                const placeholder = inputEl.placeholder || input.element.getAttribute('aria-label') || ''
+
+                if (labelText) {
+                    displayText = labelText
+                } else if (placeholder) {
+                    displayText = placeholder
+                } else {
+                    displayText = `[${input.type || input.tag}]`
+                }
+
+                items.push({
+                    tag: input.tag,
+                    text: displayText,
+                    selector: input.selector,
+                    value: input.value,
+                    type: input.type,
+                    label: labelText || undefined,
+                    position: {
+                        x: Math.round(input.rect.x),
+                        y: Math.round(input.rect.y),
+                        width: Math.round(input.rect.width),
+                        height: Math.round(input.rect.height)
+                    }
+                })
+            }
+
+            for (const action of actionElements) {
+                const text = (action.element.textContent || '').trim() || `[${action.tag}]`
+
+                items.push({
+                    tag: action.tag,
+                    text,
+                    selector: action.selector,
+                    position: {
+                        x: Math.round(action.rect.x),
+                        y: Math.round(action.rect.y),
+                        width: Math.round(action.rect.width),
+                        height: Math.round(action.rect.height)
+                    }
+                })
+            }
+
+            items.sort((a, b) => {
+                const yPosA = a.position?.y || 0
+                const yPosB = b.position?.y || 0
+                return yPosA - yPosB
+            })
 
             return items
         })

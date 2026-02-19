@@ -1,4 +1,4 @@
-type ActionType = 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser';
+type ActionType = 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'finish_task';
 
 export interface ApiResponse<T = any> {
   code: number
@@ -54,6 +54,14 @@ export interface PageElement {
   text: string;
   selector: string;
   value?: string;
+  type?: string;
+  label?: string;
+  position?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 export interface Action {

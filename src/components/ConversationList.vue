@@ -11,8 +11,8 @@
             :key="String(conversation.id)"
             :class="['conversation-item', { active: String(conversation.id) === String(activeId) }]"
         >
-          <div class="conversation-content" @click="$emit('select', String(conversation.id))">
-            <div v-if="editingId === String(conversation.id)" class="edit-input-wrapper">
+          <div class="conversation-content" @click="handleContentClick(String(conversation.id))">
+            <div v-if="editingId === String(conversation.id)" class="edit-input-wrapper" @click.stop>
               <input
                   ref="editInput"
                   v-model="editTitle"
@@ -145,6 +145,11 @@ const startEdit = (conversation: Conversation) => {
     editInput.value?.focus()
     editInput.value?.select()
   })
+}
+
+const handleContentClick = (id: string) => {
+  if (editingId.value) return
+  emit('select', id)
 }
 
 const handleRename = (id: string) => {
