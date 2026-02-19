@@ -49,5 +49,8 @@
       "dist/**/*",
       "package.json"
     ]
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["electron", "esbuild"]
   }
 }
