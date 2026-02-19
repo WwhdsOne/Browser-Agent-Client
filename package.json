@@ -1,7 +1,7 @@
 {
-  "name": "gui-agent-client",
+  "name": "wbrowser-gui-agent",
   "version": "1.0.0",
-  "description": "GUI智能体前后端协同执行系统客户端",
+  "description": "WBrowserGUI_AGENT - GUI智能体前后端协同执行系统客户端",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -29,5 +29,25 @@
     "vite": "^5.4.21",
     "vue-tsc": "^1.8.27",
     "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.wbrowser.gui-agent",
+    "productName": "WBrowserGUI_AGENT",
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ]
   }
 }
