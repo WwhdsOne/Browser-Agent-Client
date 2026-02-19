@@ -10,34 +10,44 @@ jobs:
     runs-on: macos-latest
     
     steps:
+      # 1️⃣ Checkout 源码
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2️⃣ 设置 Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      # 3️⃣ 安装 pnpm
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
+      # 4️⃣ 从 tag 获取版本号
       - name: Get version from tag
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
+      # 5️⃣ 更新 package.json 版本号
       - name: Update package.json version
         run: |
           jq '.version = "${{ steps.get_version.outputs.VERSION }}"' package.json > tmp.json
           mv tmp.json package.json
 
+      # 6️⃣ 安装依赖
       - name: Install dependencies
         run: pnpm install
 
+      # 7️⃣ 构建 Electron 应用
       - name: Build Electron app
         run: pnpm run electron:build
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}   # ✅ 给 Electron-builder 使用
 
+      # 8️⃣ 创建 GitHub Release 并上传产物
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -48,4 +58,4 @@ jobs:
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}  # ✅ 给 action-gh-release 使用
