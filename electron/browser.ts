@@ -160,9 +160,11 @@ export class BrowserManager {
 
                 const args = [
                     `--remote-debugging-port=${CDP_PORT}`,
+                    `--remote-debugging-address=0.0.0.0`,
                     `--user-data-dir=${userDataDir}`,
                     '--no-first-run',
-                    '--no-default-browser-check'
+                    '--no-default-browser-check',
+                    '--no-sandbox'
                 ]
 
                 console.log('========== Chrome 启动调试信息 ==========')
