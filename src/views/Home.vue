@@ -135,6 +135,10 @@
       {{ errorMessage }}
       <button @click="errorMessage = ''">×</button>
     </div>
+
+    <div v-if="successMessage" class="success-toast">
+      {{ successMessage }}
+    </div>
   </div>
 </template>
 
@@ -167,6 +171,7 @@ const chromePath = ref('')
 const chromeError = ref('')
 const chromeLaunching = ref(false)
 const errorMessage = ref('')
+const successMessage = ref('')
 const isPaused = ref(false)
 const pauseReason = ref('')
 const pendingActionId = ref('')
@@ -180,6 +185,13 @@ const currentMessages = computed(() => {
   if (!conversationStore.currentConversation) return []
   return conversationStore.messages.get(conversationStore.currentConversation.id) || []
 })
+
+const showSuccessToast = (msg: string) => {
+  successMessage.value = msg
+  setTimeout(() => {
+    successMessage.value = ''
+  }, 2000)
+}
 
 const refreshConversationList = async () => {
   try {
@@ -361,6 +373,7 @@ const handleWSMessage = async (message: ServerMessage) => {
       isExecuting.value = false
       currentTask.value = ''
       currentMessageId.value = ''
+      showSuccessToast('任务完成')
       break
     case 'error':
       console.error('WebSocket error:', message.message)
@@ -1058,5 +1071,28 @@ onBeforeUnmount(() => {
   font-size: 18px;
   padding: 0;
   line-height: 1;
+}
+
+.success-toast {
+  position: fixed;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--success-bg);
+  color: var(--success-text);
+  padding: 12px 24px;
+  border-radius: 6px;
+  border: 1px solid var(--success-border);
+  z-index: 1001;
+  font-size: 14px;
+  font-weight: 500;
+  animation: fadeInOut 2s ease-in-out;
+}
+
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  85% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
 }
 </style>

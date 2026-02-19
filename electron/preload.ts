@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, shell } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   browser: {
@@ -17,5 +17,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     validatePath: (path: string) => ipcRenderer.invoke('chrome:validatePath', path),
     selectPath: () => ipcRenderer.invoke('chrome:selectPath'),
     launch: (chromePath: string) => ipcRenderer.invoke('chrome:launch', chromePath)
+  },
+  shell: {
+    openExternal: (url: string) => shell.openExternal(url)
   }
 })

@@ -22,6 +22,9 @@ export interface ElectronAPI {
     selectPath: () => Promise<{ canceled: boolean; path?: string }>
     launch: (chromePath: string) => Promise<{ success: boolean; error?: string }>
   }
+  shell: {
+    openExternal: (url: string) => Promise<void>
+  }
 }
 
 declare global {
