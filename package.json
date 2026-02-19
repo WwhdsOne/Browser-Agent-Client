@@ -33,6 +33,7 @@
   "build": {
     "appId": "com.wbrowser.gui-agent",
     "productName": "WBrowserGUI_AGENT",
+    "artifactName": "${productName}-v${version}-${arch}.${ext}",
     "mac": {
       "target": [
         {
