@@ -391,12 +391,6 @@ const executeAction = async (action: Action) => {
   const actionId = action.action_id
   const startTime = Date.now()
   
-  if (action.action === 'close_browser') {
-    await window.electronAPI.browser.execute(conversationId, action)
-    await messageListRef.value?.refreshExpandedActions()
-    return
-  }
-  
   let result = await window.electronAPI.browser.execute(conversationId, action)
   
   if (!result.success && result.error?.includes('Browser not found')) {

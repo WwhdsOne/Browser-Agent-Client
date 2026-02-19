@@ -4,14 +4,27 @@ export interface ChromeInfo {
   error?: string
 }
 
+export interface PageState {
+  url: string
+  title: string
+  elements: any[]
+  scrollInfo?: {
+    scrollHeight: number
+    clientHeight: number
+    scrollTop: number
+    hasMoreBelow: boolean
+    hasMoreAbove: boolean
+  }
+}
+
 export interface ElectronAPI {
   browser: {
     create: (conversationId: string) => Promise<boolean>
     connectExisting: (conversationId: string) => Promise<{ success: boolean; error?: string }>
     isCDPReady: () => Promise<boolean>
     connectOrLaunch: (chromePath: string, conversationId: string) => Promise<{ success: boolean; error?: string }>
-    execute: (conversationId: string, action: any) => Promise<{ success: boolean; error?: string; pageState?: any }>
-    getState: (conversationId: string) => Promise<{ url: string; elements: any[] }>
+    execute: (conversationId: string, action: any) => Promise<{ success: boolean; error?: string; pageState?: PageState }>
+    getState: (conversationId: string) => Promise<PageState>
     close: (conversationId: string) => Promise<boolean>
     detectVerification: (conversationId: string) => Promise<boolean>
     detectLogin: (conversationId: string) => Promise<boolean>
