@@ -23,20 +23,25 @@ jobs:
         with:
           version: 9
 
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Update package.json version
+        run: |
+          jq '.version = "${{ steps.get_version.outputs.VERSION }}"' package.json > tmp.json
+          mv tmp.json package.json
+
       - name: Install dependencies
         run: pnpm install
 
       - name: Build Electron app
         run: pnpm run electron:build
 
-      - name: Get version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: WBrowserGUI_AGENT ${{ steps.get_version.outputs.VERSION }}
+          name: WBrowserGUI_AGENT v${{ steps.get_version.outputs.VERSION }}
           files: |
             release/*.dmg
             release/*.zip
