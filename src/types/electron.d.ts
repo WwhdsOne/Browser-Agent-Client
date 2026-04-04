@@ -4,17 +4,51 @@ export interface ChromeInfo {
   error?: string
 }
 
+export interface SelectOption {
+  value: string
+  text: string
+}
+
+export interface PageElement {
+  index: number
+  tag: string
+  text: string
+  selector: string
+  value?: string
+  type?: string
+  label?: string
+  role?: string
+  ariaLabel?: string
+  ariaExpanded?: string
+  ariaChecked?: string
+  ariaRequired?: boolean
+  ariaDisabled?: boolean
+  required?: boolean
+  disabled?: boolean
+  options?: SelectOption[]
+  isNew?: boolean
+  position?: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+}
+
+export interface ScrollInfo {
+  scrollHeight: number
+  clientHeight: number
+  scrollTop: number
+  hasMoreBelow: boolean
+  hasMoreAbove: boolean
+}
+
 export interface PageState {
   url: string
   title: string
-  elements: any[]
-  scrollInfo?: {
-    scrollHeight: number
-    clientHeight: number
-    scrollTop: number
-    hasMoreBelow: boolean
-    hasMoreAbove: boolean
-  }
+  elements: PageElement[]
+  elementText: string
+  scrollInfo?: ScrollInfo
 }
 
 export interface ElectronAPI {

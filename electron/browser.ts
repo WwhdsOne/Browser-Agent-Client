@@ -7,13 +7,29 @@ import {join, dirname} from 'path'
 
 const execAsync = promisify(exec)
 
+export interface SelectOption {
+    value: string
+    text: string
+}
+
 export interface PageElement {
+    index: number
     tag: string
     text: string
     selector: string
     value?: string
     type?: string
     label?: string
+    role?: string
+    ariaLabel?: string
+    ariaExpanded?: string
+    ariaChecked?: string
+    ariaRequired?: boolean
+    ariaDisabled?: boolean
+    required?: boolean
+    disabled?: boolean
+    options?: SelectOption[]
+    isNew?: boolean
     position?: {
         x: number
         y: number
@@ -34,12 +50,14 @@ export interface PageState {
     url: string
     title: string
     elements: PageElement[]
+    elementText: string
     scrollInfo?: ScrollInfo
 }
 
 export interface Action {
     action_id: string
     action: 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'close_browser' | 'finish_task'
+    index?: number
     selector?: string
     value?: string
     url?: string
@@ -63,6 +81,16 @@ const CDP_PORT = 9222
 
 function escapeSelector(selector: string): string {
     if (!selector) return selector
+
+    // 转换 jQuery 伪选择器 :contains("text") → Playwright :has-text("text")
+    selector = selector.replace(/:contains\(/g, ':has-text(')
+
+    // 剥离其他不支持的 jQuery 伪选择器
+    selector = selector.replace(/:visible/g, '')
+    selector = selector.replace(/:hidden/g, '')
+    selector = selector.replace(/:first/g, '')
+    selector = selector.replace(/:last/g, '')
+    selector = selector.replace(/:eq\(\d+\)/g, '')
 
     // 处理 ID 选择器：#xxx
     if (selector.startsWith('#')) {
@@ -105,6 +133,8 @@ const CHROME_PATHS: Record<string, string[]> = {
 export class BrowserManager {
     private browsers: Map<string, { browser: Browser; page: Page; isExisting: boolean }> = new Map()
     private chromeProcess: any = null
+    // 缓存上一次提取的元素选择器集合，用于增量 isNew 标记
+    private previousSelectors: Map<string, Set<string>> = new Map()
 
     getDefaultChromePath(): ChromeInfo {
         const currentPlatform = platform()
@@ -357,24 +387,50 @@ export class BrowserManager {
         const {page, browser} = instance
 
         try {
+            // 方案 Y：优先使用 index 查找 selector，selector 作为后备
+            let resolvedSelector = action.selector || ''
+            if (action.index !== undefined && !resolvedSelector) {
+                resolvedSelector = await this.resolveIndexToSelector(page, action.index)
+                if (!resolvedSelector) {
+                    return {success: false, error: `未找到编号为 ${action.index} 的元素`}
+                }
+                console.log(`[executeAction] index=${action.index} → selector=${resolvedSelector}`)
+            }
+
             const context = page.context()
             const pagesBefore = context.pages()
+            const urlBefore = page.url()
 
             switch (action.action) {
                 case 'goto':
                     await page.goto(action.url!, {waitUntil: 'domcontentloaded'})
                     break
                 case 'click':
-                    await this.smartClick(page, escapeSelector(action.selector!))
+                    if (!resolvedSelector) {
+                        return {success: false, error: 'click 操作缺少 index 或 selector'}
+                    }
+                    console.log(`[executeAction] click: index=${action.index} selector=${resolvedSelector}`)
+                    await this.highlightElement(page, escapeSelector(resolvedSelector), action.index)
+                    await this.smartClick(page, escapeSelector(resolvedSelector))
                     await page.waitForLoadState('domcontentloaded')
                     break
                 case 'input':
-                    const inputSelector = escapeSelector(action.selector!)
+                    if (!resolvedSelector) {
+                        return {success: false, error: 'input 操作缺少 index 或 selector'}
+                    }
+                    console.log(`[executeAction] input: index=${action.index} selector=${resolvedSelector} value=${action.value}`)
+                    const inputSelector = escapeSelector(resolvedSelector)
+                    await this.highlightElement(page, inputSelector, action.index)
                     await page.fill(inputSelector, action.value!)
                     await page.press(inputSelector, 'Enter')
                     break
                 case 'select':
-                    await page.selectOption(escapeSelector(action.selector!), action.value!)
+                    if (!resolvedSelector) {
+                        return {success: false, error: 'select 操作缺少 index 或 selector'}
+                    }
+                    console.log(`[executeAction] select: index=${action.index} selector=${resolvedSelector} value=${action.value}`)
+                    await this.highlightElement(page, escapeSelector(resolvedSelector), action.index)
+                    await page.selectOption(escapeSelector(resolvedSelector), action.value!)
                     break
                 case 'scroll':
                     await page.mouse.wheel(0, action.distance!)
@@ -385,7 +441,7 @@ export class BrowserManager {
                 case 'finish_task':
                     return {success: true}
                 default:
-                    return {success: false, error: `Unknown action: ${action.action}`}
+                    return {success: false, error: `未知操作: ${action.action}`}
             }
 
             await page.waitForTimeout(2000)
@@ -406,7 +462,6 @@ export class BrowserManager {
                 console.log(`[保留新页面] ${newPage.url()}`)
             }
 
-
             const pageState = await this.getPageState(conversationId)
             return {success: true, pageState}
         } catch (error) {
@@ -414,10 +469,213 @@ export class BrowserManager {
         }
     }
 
+    /**
+     * 在目标元素上显示高亮覆盖层，让用户看到 Agent 正在操作哪个元素
+     * 高亮持续约 800ms 后自动淡出消失
+     */
+    private async highlightElement(page: Page, selector: string, index?: number): Promise<void> {
+        try {
+            await page.evaluate(({sel, idx}: {sel: string, idx?: number}) => {
+                const el = document.querySelector(sel)
+                if (!el) return
+
+                let rect = el.getBoundingClientRect()
+
+                // 隐藏的 radio/checkbox：查找关联的可见 label 用于高亮定位
+                const inputType = (el as HTMLInputElement).type?.toLowerCase()
+                if ((rect.width === 0 && rect.height === 0 || window.getComputedStyle(el).display === 'none') && (inputType === 'radio' || inputType === 'checkbox')) {
+                    const inputId = el.id
+                    // 策略1: 任意带 for="id" 的可见元素
+                    if (inputId && rect.width === 0) {
+                        const forEl = document.querySelector(`[for="${CSS.escape(inputId)}"]`)
+                        if (forEl) rect = forEl.getBoundingClientRect()
+                    }
+                    // 策略2: 父级 <label>
+                    if (rect.width === 0 && rect.height === 0) {
+                        const parentLabel = el.closest('label')
+                        if (parentLabel) rect = parentLabel.getBoundingClientRect()
+                    }
+                    // 策略3: 可见兄弟元素
+                    if (rect.width === 0 && rect.height === 0) {
+                        const parent = el.parentElement
+                        if (parent) {
+                            for (const sib of Array.from(parent.children)) {
+                                if (sib === el) continue
+                                const sibHtml = sib as HTMLElement
+                                if (sibHtml.offsetWidth === 0 || sibHtml.offsetHeight === 0) continue
+                                const sibStyle = window.getComputedStyle(sib)
+                                if (sibStyle.display === 'none' || sibStyle.visibility === 'hidden') continue
+                                rect = sib.getBoundingClientRect()
+                                break
+                            }
+                        }
+                    }
+                    // 策略4: 向上查找祖先容器
+                    if (rect.width === 0 && rect.height === 0) {
+                        const container = el.closest('[class*="radio"], [class*="check"], [class*="ui-radio"], [class*="ui-check"], [class*="field"]')
+                        if (container) {
+                            if (inputId) {
+                                const forEl = container.querySelector(`[for="${CSS.escape(inputId)}"]`)
+                                if (forEl) rect = forEl.getBoundingClientRect()
+                            }
+                            if (rect.width === 0 && rect.height === 0) {
+                                const candidates = container.querySelectorAll('a, div, span, label')
+                                for (const c of Array.from(candidates)) {
+                                    const cHtml = c as HTMLElement
+                                    if (cHtml.offsetWidth > 0 && cHtml.offsetHeight > 0) {
+                                        rect = c.getBoundingClientRect()
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (rect.width === 0 && rect.height === 0) return
+
+                // 创建高亮覆盖层
+                const overlay = document.createElement('div')
+                overlay.setAttribute('data-agent-highlight', 'true')
+                Object.assign(overlay.style, {
+                    position: 'fixed',
+                    zIndex: '2147483647',
+                    pointerEvents: 'none',
+                    border: '2px solid #4A90D9',
+                    background: 'rgba(74, 144, 217, 0.12)',
+                    borderRadius: '3px',
+                    top: `${rect.top}px`,
+                    left: `${rect.left}px`,
+                    width: `${rect.width}px`,
+                    height: `${rect.height}px`,
+                    transition: 'opacity 0.3s ease-out',
+                    opacity: '1',
+                    boxSizing: 'border-box',
+                })
+
+                // 如果有编号，在左上角显示标签
+                if (idx !== undefined) {
+                    const label = document.createElement('span')
+                    Object.assign(label.style, {
+                        position: 'absolute',
+                        top: '-20px',
+                        left: '-2px',
+                        background: '#4A90D9',
+                        color: '#fff',
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        lineHeight: '18px',
+                        padding: '0 5px',
+                        borderRadius: '2px',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'monospace',
+                    })
+                    label.textContent = `[${idx}]`
+                    overlay.appendChild(label)
+                }
+
+                document.body.appendChild(overlay)
+
+                // 800ms 后淡出并移除
+                setTimeout(() => {
+                    overlay.style.opacity = '0'
+                    setTimeout(() => overlay.remove(), 300)
+                }, 800)
+            }, {sel: selector, idx: index})
+        } catch (e) {
+            // 高亮失败不影响主流程，静默忽略
+            console.warn('[highlightElement] 高亮注入失败:', e)
+        }
+    }
+
+    /**
+     * 通过 index 编号查找当前页面对应元素的 selector
+     * 用于方案 Y：LLM 返回 index，BrowserManager 查找对应 selector
+     */
+    private async resolveIndexToSelector(page: Page, index: number): Promise<string | null> {
+        try {
+            const selector = await page.evaluate((targetIndex: number) => {
+                const viewportHeight = window.innerHeight
+                const viewportWidth = window.innerWidth
+
+                const generateSelector = (el: Element): string | null => {
+                    if (el.id) return `#${el.id}`
+                    const name = el.getAttribute('name')
+                    if (name) return `[name="${name}"]`
+                    const ariaLabel = el.getAttribute('aria-label')
+                    if (ariaLabel) return `[aria-label="${ariaLabel}"]`
+                    const placeholder = el.getAttribute('placeholder')
+                    if (placeholder && placeholder.length < 30) return `[placeholder="${placeholder}"]`
+                    if (el.tagName.toLowerCase() === 'a') {
+                        const href = el.getAttribute('href')
+                        if (href && href.length < 80 && !href.startsWith('javascript:')) return `a[href="${href}"]`
+                    }
+                    const tagName = el.tagName.toLowerCase()
+                    if (['input', 'textarea', 'select'].includes(tagName)) {
+                        const classList = Array.from(el.classList)
+                        if (classList.length > 0) return `${tagName}.${classList[0]}`
+                    }
+                    return null
+                }
+
+                const isInViewport = (rect: DOMRect): boolean =>
+                    rect.top < viewportHeight && rect.bottom > 0 && rect.left < viewportWidth && rect.right > 0
+
+                const isInteractable = (el: Element): boolean => {
+                    const style = window.getComputedStyle(el)
+                    if (style.display === 'none' || style.visibility === 'hidden') return false
+                    if (style.opacity === '0') return false
+                    const htmlEl = el as HTMLElement
+                    return htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0
+                }
+
+                const allSelectors = [
+                    'input:not([type="hidden"]):not([disabled])',
+                    'textarea:not([disabled])',
+                    'select:not([disabled])',
+                    'button:not([disabled])',
+                    'a[href]:not([href=""])',
+                    '[role="button"]:not([disabled])',
+                    '[role="link"]:not([disabled])',
+                    '[role="tab"]:not([disabled])',
+                    '[role="menuitem"]:not([disabled])',
+                    '[role="option"]:not([disabled])',
+                    '[role="checkbox"]:not([disabled])',
+                    '[role="radio"]:not([disabled])',
+                    '[role="switch"]:not([disabled])',
+                    '[onclick]:not([disabled])'
+                ]
+
+                const seen = new Set<string>()
+                const collected: { selector: string; y: number; x: number }[] = []
+
+                for (const sel of allSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const rect = el.getBoundingClientRect()
+                        if (!isInViewport(rect) || !isInteractable(el)) return
+                        const elementSelector = generateSelector(el)
+                        if (!elementSelector || elementSelector.length > 100) return
+                        if (seen.has(elementSelector)) return
+                        seen.add(elementSelector)
+                        collected.push({selector: elementSelector, y: rect.y + rect.height / 2, x: rect.x + rect.width / 2})
+                    })
+                }
+
+                collected.sort((a, b) => a.y - b.y || a.x - b.x)
+                return collected[targetIndex]?.selector || null
+            }, index)
+
+            return selector
+        } catch (error) {
+            console.error(`[resolveIndexToSelector] 查找 index=${index} 失败:`, error)
+            return null
+        }
+    }
+
     async getPageState(conversationId: string): Promise<PageState> {
         const instance = this.browsers.get(conversationId)
         if (!instance) {
-            return {url: '', title: '', elements: []}
+            return {url: '', title: '', elements: [], elementText: ''}
         }
 
         const {page} = instance
@@ -431,7 +689,7 @@ export class BrowserManager {
         console.log(`[getState] title: ${Date.now() - t1}ms`)
 
         const t2 = Date.now()
-        const elements = await this.extractPageElements(page)
+        const elements = await this.extractPageElements(page, conversationId)
         console.log(`[getState] extractPageElements: ${Date.now() - t2}ms`)
 
         const t3 = Date.now()
@@ -451,8 +709,83 @@ export class BrowserManager {
         })
         console.log(`[getState] scrollInfo: ${Date.now() - t3}ms`)
 
-        console.log(`[getState] 总计: ${Date.now() - t0}ms`)
-        return {url, title, elements, scrollInfo}
+        // 生成 LLM 可读的编号索引文本
+        const elementText = this.generateElementText(url, title, elements, scrollInfo)
+
+        console.log(`[getState] 总计: ${Date.now() - t0}ms, 元素数: ${elements.length}`)
+        return {url, title, elements, elementText, scrollInfo}
+    }
+
+    /**
+     * 生成 LLM 可读的编号索引文本
+     * 格式参考 browser-use 的 DOM 序列化输出，但更轻量
+     */
+    private generateElementText(url: string, title: string, elements: PageElement[], scrollInfo?: ScrollInfo): string {
+        const lines: string[] = []
+
+        // 页面头部信息
+        lines.push(`页面: ${url}`)
+        lines.push(`标题: ${title}`)
+
+        if (scrollInfo) {
+            const scrollHints: string[] = []
+            if (scrollInfo.hasMoreAbove) scrollHints.push('上方有更多内容')
+            if (scrollInfo.hasMoreBelow) scrollHints.push('下方有更多内容')
+            if (scrollHints.length > 0) {
+                lines.push(`滚动: ${scrollHints.join(', ')}`)
+            }
+        }
+
+        lines.push('')
+        lines.push('可交互元素:')
+
+        for (const el of elements) {
+            const prefix = el.isNew ? '*' : ''
+            let line = `${prefix}[${el.index}] `
+
+            // 标签和类型
+            const tag = el.tag
+            const attrs: string[] = []
+
+            if (el.type && el.type !== el.tag) attrs.push(`type="${el.type}"`)
+            if (el.role) attrs.push(`role="${el.role}"`)
+            if (el.ariaLabel) attrs.push(`aria-label="${el.ariaLabel}"`)
+            if (el.ariaExpanded) attrs.push(`aria-expanded="${el.ariaExpanded}"`)
+            if (el.ariaChecked) attrs.push(`aria-checked="${el.ariaChecked}"`)
+            if (el.required || el.ariaRequired) attrs.push('required')
+            if (el.disabled || el.ariaDisabled) attrs.push('disabled')
+
+            line += `<${tag}`
+            if (attrs.length > 0) line += ' ' + attrs.join(' ')
+            line += `> ${el.text}</${tag}>`
+
+            // Label 附加信息
+            if (el.label && el.label !== el.text) {
+                line += ` (标签: ${el.label})`
+            }
+
+            // Select 选项列表
+            if (el.options && el.options.length > 0) {
+                const optTexts = el.options.slice(0, 10).map(o => o.text || o.value)
+                line += ` [选项: ${optTexts.join(', ')}]`
+                if (el.options.length > 10) line += ` ...共${el.options.length}项`
+            }
+
+            // 当前值
+            if (el.value && el.type !== 'password') {
+                const displayVal = el.value.length > 50 ? el.value.slice(0, 50) + '...' : el.value
+                line += ` (当前值: "${displayVal}")`
+            }
+
+            lines.push(line)
+        }
+
+        if (elements.some(e => e.isNew)) {
+            lines.push('')
+            lines.push('* 标记为本次新增的元素')
+        }
+
+        return lines.join('\n')
     }
 
     private async smartClick(page: Page, selector: string): Promise<void> {
@@ -623,330 +956,362 @@ export class BrowserManager {
         }, selector)
     }
 
-    private async extractPageElements(page: Page): Promise<PageElement[]> {
-        const result = await page.evaluate(() => {
+    private async extractPageElements(page: Page, conversationId: string): Promise<PageElement[]> {
+        // 获取上一次的选择器集合用于增量标记
+        const prevSelectors = this.previousSelectors.get(conversationId) || new Set<string>()
+
+        const result = await page.evaluate((prevSelectorArr: string[]) => {
+            const prevSelectors = new Set(prevSelectorArr)
             const viewportHeight = window.innerHeight
             const viewportWidth = window.innerWidth
-            const items: PageElement[] = []
+            const items: any[] = []
 
-            interface ElementInfo {
-                element: Element
-                tag: string
-                type?: string
-                selector: string
-                rect: DOMRect
-                centerX: number
-                centerY: number
-                value?: string
-            }
-
-            interface TextInfo {
-                text: string
-                rect: DOMRect
-                centerX: number
-                centerY: number
-            }
-
+            // --- 辅助函数 ---
             const generateSelector = (el: Element): string | null => {
                 if (el.id) return `#${el.id}`
-
                 const name = el.getAttribute('name')
                 if (name) return `[name="${name}"]`
-
                 const ariaLabel = el.getAttribute('aria-label')
                 if (ariaLabel) return `[aria-label="${ariaLabel}"]`
-
                 const placeholder = el.getAttribute('placeholder')
-                if (placeholder && placeholder.length < 30) {
-                    return `[placeholder="${placeholder}"]`
-                }
-
+                if (placeholder && placeholder.length < 30) return `[placeholder="${placeholder}"]`
                 if (el.tagName.toLowerCase() === 'a') {
                     const href = el.getAttribute('href')
-                    if (href && href.length < 80 && !href.startsWith('javascript:')) {
-                        return `a[href="${href}"]`
-                    }
+                    if (href && href.length < 80 && !href.startsWith('javascript:')) return `a[href="${href}"]`
                 }
-
                 const tagName = el.tagName.toLowerCase()
                 if (['input', 'textarea', 'select'].includes(tagName)) {
                     const classList = Array.from(el.classList)
-                    if (classList.length > 0) {
-                        return `${tagName}.${classList[0]}`
-                    }
+                    if (classList.length > 0) return `${tagName}.${classList[0]}`
                 }
-
                 return null
             }
 
-            const isInViewport = (rect: DOMRect): boolean => {
-                return (
-                    rect.top < viewportHeight &&
-                    rect.bottom > 0 &&
-                    rect.left < viewportWidth &&
-                    rect.right > 0
-                )
-            }
+            const isInViewport = (rect: DOMRect): boolean =>
+                rect.top < viewportHeight && rect.bottom > 0 && rect.left < viewportWidth && rect.right > 0
 
             const isInteractable = (el: Element): boolean => {
-                const htmlEl = el as HTMLElement
                 const style = window.getComputedStyle(el)
-
                 if (style.display === 'none' || style.visibility === 'hidden') return false
                 if (style.opacity === '0') return false
+                const htmlEl = el as HTMLElement
                 if (htmlEl.offsetWidth === 0 || htmlEl.offsetHeight === 0) return false
-
                 return true
             }
 
-            const distance = (a: { centerX: number; centerY: number }, b: { centerX: number; centerY: number }): number => {
-                return Math.sqrt(
-                    Math.pow(a.centerX - b.centerX, 2) +
-                    Math.pow(a.centerY - b.centerY, 2)
-                )
-            }
+            const distance = (a: { cx: number; cy: number }, b: { cx: number; cy: number }): number =>
+                Math.sqrt((a.cx - b.cx) ** 2 + (a.cy - b.cy) ** 2)
 
-            const findLabelAbove = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
-                const candidates = texts.filter(t =>
-                    t.centerY < input.centerY &&
-                    (input.centerY - t.centerY) < 150
-                )
-
-                if (candidates.length === 0) return null
-
-                candidates.sort((a, b) =>
-                    (input.centerY - a.centerY) - (input.centerY - b.centerY)
-                )
-
+            const findLabelAbove = (input: any, texts: any[]): any | null => {
+                const candidates = texts.filter(t => t.cy < input.cy && (input.cy - t.cy) < 150)
+                if (!candidates.length) return null
+                candidates.sort((a: any, b: any) => (input.cy - a.cy) - (input.cy - b.cy))
                 return candidates[0]
             }
 
-            const findLabelLeft = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
-                const candidates = texts.filter(t =>
-                    Math.abs(t.centerY - input.centerY) < 30 &&
-                    t.centerX < input.centerX
-                )
-
-                if (candidates.length === 0) return null
-
-                candidates.sort((a, b) =>
-                    (input.centerX - a.centerX) - (input.centerX - b.centerX)
-                )
-
+            const findLabelLeft = (input: any, texts: any[]): any | null => {
+                const candidates = texts.filter(t => Math.abs(t.cy - input.cy) < 30 && t.cx < input.cx)
+                if (!candidates.length) return null
+                candidates.sort((a: any, b: any) => (input.cx - a.cx) - (input.cx - b.cx))
                 return candidates[0]
             }
 
-            const findNearest = (input: ElementInfo, texts: TextInfo[], maxDist: number = 200): TextInfo | null => {
-                const candidates = texts
+            const findNearest = (input: any, texts: any[], maxDist = 200): any | null => {
+                return texts
                     .map(t => ({ ...t, dist: distance(input, t) }))
                     .filter(t => t.dist < maxDist)
-                    .sort((a, b) => a.dist - b.dist)
-
-                return candidates[0] || null
+                    .sort((a: any, b: any) => a.dist - b.dist)[0] || null
             }
 
-            const findLabelInContainer = (input: ElementInfo, texts: TextInfo[]): TextInfo | null => {
+            const findLabelInContainer = (input: any, texts: any[]): any | null => {
                 const containerClasses = ['question', 'form-item', 'form-group', 'field', 'input-group']
-                const el = input.element
-
                 for (const cls of containerClasses) {
-                    const container = el.closest(`[class*="${cls}"]`)
+                    const container = input.el.closest(`[class*="${cls}"]`)
                     if (container) {
-                        const containerRect = container.getBoundingClientRect()
-                        const containerTexts = texts.filter(t =>
-                            t.rect.top >= containerRect.top &&
-                            t.rect.bottom <= containerRect.bottom &&
-                            t.rect.left >= containerRect.left &&
-                            t.rect.right <= containerRect.right
-                        )
-
-                        if (containerTexts.length > 0) {
-                            return findLabelAbove(input, containerTexts) || findLabelLeft(input, containerTexts)
-                        }
+                        const cr = container.getBoundingClientRect()
+                        const ct = texts.filter(t => t.rect.top >= cr.top && t.rect.bottom <= cr.bottom)
+                        if (ct.length) return findLabelAbove(input, ct) || findLabelLeft(input, ct)
                     }
                 }
-
                 return null
             }
 
+            // --- 采集可交互元素 ---
             const inputSelectors = [
                 'input:not([type="hidden"]):not([disabled])',
                 'textarea:not([disabled])',
                 'select:not([disabled])'
             ]
-
             const actionSelectors = [
                 'button:not([disabled])',
                 'a[href]:not([href=""])',
                 '[role="button"]:not([disabled])',
+                '[role="link"]:not([disabled])',
+                '[role="tab"]:not([disabled])',
+                '[role="menuitem"]:not([disabled])',
+                '[role="option"]:not([disabled])',
+                '[role="checkbox"]:not([disabled])',
+                '[role="radio"]:not([disabled])',
+                '[role="switch"]:not([disabled])',
                 '[onclick]:not([disabled])'
             ]
 
-            const inputElements: ElementInfo[] = []
-            const actionElements: ElementInfo[] = []
             const seenSelectors = new Set<string>()
+            const allCollected: any[] = []
 
-            for (const selector of inputSelectors) {
-                const nodes = document.querySelectorAll(selector)
-                nodes.forEach((el) => {
+            // 采集输入类元素
+            for (const sel of inputSelectors) {
+                document.querySelectorAll(sel).forEach(el => {
                     const rect = el.getBoundingClientRect()
-                    if (!isInViewport(rect) || !isInteractable(el)) return
+                    const inputType = (el as HTMLInputElement).type?.toLowerCase()
 
+                    // radio/checkbox 常被隐藏，改为查找可见的关联 label
+                    let isVisible = isInViewport(rect) && isInteractable(el)
+                    let effectiveRect = rect
+                    let labelEl: Element | null = null
+
+                    if (!isVisible && (inputType === 'radio' || inputType === 'checkbox')) {
+                        // 策略1: 任意带 for="inputId" 的可见元素（<label>、<div class="label"> 等）
+                        const inputId = el.id
+                        if (inputId) {
+                            const forEl = document.querySelector(`[for="${CSS.escape(inputId)}"]`)
+                            if (forEl && isInteractable(forEl)) {
+                                const forRect = forEl.getBoundingClientRect()
+                                if (isInViewport(forRect)) {
+                                    isVisible = true
+                                    effectiveRect = forRect
+                                    labelEl = forEl
+                                }
+                            }
+                        }
+
+                        // 策略2: 父级 <label>
+                        if (!isVisible) {
+                            const parentLabel = el.closest('label')
+                            if (parentLabel && isInteractable(parentLabel)) {
+                                const labelRect = parentLabel.getBoundingClientRect()
+                                if (isInViewport(labelRect)) {
+                                    isVisible = true
+                                    effectiveRect = labelRect
+                                    labelEl = parentLabel
+                                }
+                            }
+                        }
+
+                        // 策略3: 同级可见元素（问卷网站常见：隐藏 input + 自定义样式兄弟节点）
+                        if (!isVisible) {
+                            const parent = el.parentElement
+                            if (parent) {
+                                for (const sibling of Array.from(parent.children)) {
+                                    if (sibling === el) continue
+                                    const sibHtml = sibling as HTMLElement
+                                    if (sibHtml.offsetWidth === 0 || sibHtml.offsetHeight === 0) continue
+                                    const sibStyle = window.getComputedStyle(sibling)
+                                    if (sibStyle.display === 'none' || sibStyle.visibility === 'hidden') continue
+                                    const sibRect = sibling.getBoundingClientRect()
+                                    if (!isInViewport(sibRect)) continue
+                                    // 不用词边界，匹配 jqradio、jqcheckbox 等拼接类名
+                                    const sibClass = (sibling.className || '').toString().toLowerCase()
+                                    const sibTag = sibling.tagName.toLowerCase()
+                                    if (/label|radio|check|box|indicator|mark|icon/i.test(sibClass) || sibTag === 'label') {
+                                        isVisible = true
+                                        effectiveRect = sibRect
+                                        labelEl = sibling
+                                        break
+                                    }
+                                }
+                            }
+                        }
+
+                        // 策略4: 向上查找祖先容器内的可见元素（wjx.cn: input→span→div.ui-radio, label 在 div.ui-radio 下）
+                        if (!isVisible) {
+                            const containers = el.closest('[class*="radio"], [class*="check"], [class*="ui-radio"], [class*="ui-check"], [class*="field"]')
+                            if (containers) {
+                                // 优先找带 for 属性的元素
+                                if (inputId) {
+                                    const forInContainer = containers.querySelector(`[for="${CSS.escape(inputId)}"]`)
+                                    if (forInContainer && isInteractable(forInContainer)) {
+                                        const forRect = forInContainer.getBoundingClientRect()
+                                        if (isInViewport(forRect)) {
+                                            isVisible = true
+                                            effectiveRect = forRect
+                                            labelEl = forInContainer
+                                        }
+                                    }
+                                }
+                                // 找容器内可见的关联元素
+                                if (!isVisible) {
+                                    const candidates = containers.querySelectorAll('a, div, span, label')
+                                    for (const candidate of Array.from(candidates)) {
+                                        if (candidate === el || !isInteractable(candidate)) continue
+                                        const candRect = candidate.getBoundingClientRect()
+                                        if (!isInViewport(candRect)) continue
+                                        const candClass = (candidate.className || '').toString().toLowerCase()
+                                        if (/radio|check|box|label|indicator/i.test(candClass)) {
+                                            isVisible = true
+                                            effectiveRect = candRect
+                                            labelEl = candidate
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!isVisible) return
                     const elementSelector = generateSelector(el)
                     if (!elementSelector || elementSelector.length > 100) return
                     if (seenSelectors.has(elementSelector)) return
                     seenSelectors.add(elementSelector)
 
                     const tagName = el.tagName.toLowerCase()
-                    const inputEl = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+                    const inputEl = el as HTMLInputElement
+                    const value = tagName === 'select' ? (el as HTMLSelectElement).value || '' : inputEl.value || ''
 
-                    let value: string | undefined
+                    // 提取 select 选项
+                    let options: { value: string; text: string }[] | undefined
                     if (tagName === 'select') {
-                        value = (el as HTMLSelectElement).value || ''
-                    } else {
-                        value = (inputEl as HTMLInputElement | HTMLTextAreaElement).value || ''
+                        options = Array.from((el as HTMLSelectElement).options).map(opt => ({
+                            value: opt.value,
+                            text: opt.textContent?.trim() || ''
+                        }))
                     }
 
-                    inputElements.push({
-                        element: el,
-                        tag: tagName,
-                        type: (inputEl as HTMLInputElement).type || tagName,
-                        selector: elementSelector,
-                        rect,
-                        centerX: rect.x + rect.width / 2,
-                        centerY: rect.y + rect.height / 2,
-                        value
+                    // 从关联 label 提取文本
+                    let labelTextFromLabel = ''
+                    if (labelEl) {
+                        labelTextFromLabel = (labelEl.textContent || '').trim().slice(0, 80)
+                    }
+
+                    allCollected.push({
+                        el, tag: tagName, type: inputEl.type || tagName, selector: elementSelector,
+                        rect: effectiveRect, cx: effectiveRect.x + effectiveRect.width / 2, cy: effectiveRect.y + effectiveRect.height / 2, value, options,
+                        isInput: true, labelTextFromLabel
                     })
                 })
             }
 
-            for (const selector of actionSelectors) {
-                const nodes = document.querySelectorAll(selector)
-                nodes.forEach((el) => {
+            // 采集操作类元素
+            for (const sel of actionSelectors) {
+                document.querySelectorAll(sel).forEach(el => {
                     const rect = el.getBoundingClientRect()
                     if (!isInViewport(rect) || !isInteractable(el)) return
-
                     const elementSelector = generateSelector(el)
                     if (!elementSelector || elementSelector.length > 100) return
                     if (seenSelectors.has(elementSelector)) return
                     seenSelectors.add(elementSelector)
 
-                    actionElements.push({
-                        element: el,
-                        tag: el.tagName.toLowerCase(),
-                        selector: elementSelector,
-                        rect,
-                        centerX: rect.x + rect.width / 2,
-                        centerY: rect.y + rect.height / 2
+                    allCollected.push({
+                        el, tag: el.tagName.toLowerCase(), selector: elementSelector,
+                        rect, cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2,
+                        isInput: false
                     })
                 })
             }
 
-            const textNodes: TextInfo[] = []
-            const textElements = document.querySelectorAll('label, p, span, div, h1, h2, h3, h4, h5, h6, td, th, li')
-
-            textElements.forEach((el) => {
+            // --- 采集文本节点用于 label 关联 ---
+            const textNodes: any[] = []
+            const seenTexts = new Set<string>()
+            document.querySelectorAll('label, p, span, div, h1, h2, h3, h4, h5, h6, td, th, li').forEach(el => {
                 const text = (el.textContent || '').trim()
                 if (!text || text.length === 0 || text.length > 100) return
-
                 const rect = el.getBoundingClientRect()
                 if (!isInViewport(rect)) return
-
                 const style = window.getComputedStyle(el)
                 if (style.display === 'none' || style.visibility === 'hidden') return
-
-                textNodes.push({
-                    text,
-                    rect,
-                    centerX: rect.x + rect.width / 2,
-                    centerY: rect.y + rect.height / 2
-                })
+                if (seenTexts.has(text)) return
+                seenTexts.add(text)
+                textNodes.push({ text, rect, cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 })
             })
 
-            const seenTexts = new Set<string>()
-            const uniqueTexts = textNodes.filter(t => {
-                if (seenTexts.has(t.text)) return false
-                seenTexts.add(t.text)
-                return true
-            })
+            // --- 构建输出 ---
+            // 按 Y 位置排序，然后分配编号
+            allCollected.sort((a, b) => a.cy - b.cy || a.cx - b.cx)
+            let index = 0
 
-            for (const input of inputElements) {
+            for (const item of allCollected) {
+                const el = item.el as HTMLElement
+                const isNew = !prevSelectors.has(item.selector)
+
+                // Label 关联
                 let labelText = ''
-                let displayText = ''
-
-                const containerLabel = findLabelInContainer(input, uniqueTexts)
-                if (containerLabel) {
-                    labelText = containerLabel.text
-                } else {
-                    const aboveLabel = findLabelAbove(input, uniqueTexts)
-                    if (aboveLabel) {
-                        labelText = aboveLabel.text
-                    } else {
-                        const leftLabel = findLabelLeft(input, uniqueTexts)
-                        if (leftLabel) {
-                            labelText = leftLabel.text
-                        } else {
-                            const nearestLabel = findNearest(input, uniqueTexts)
-                            if (nearestLabel) {
-                                labelText = nearestLabel.text
+                // 优先使用从可见关联 label 提取的文本（radio/checkbox 场景）
+                if (item.labelTextFromLabel) {
+                    labelText = item.labelTextFromLabel
+                } else if (item.isInput) {
+                    const containerLabel = findLabelInContainer(item, textNodes)
+                    if (containerLabel) labelText = containerLabel.text
+                    else {
+                        const aboveLabel = findLabelAbove(item, textNodes)
+                        if (aboveLabel) labelText = aboveLabel.text
+                        else {
+                            const leftLabel = findLabelLeft(item, textNodes)
+                            if (leftLabel) labelText = leftLabel.text
+                            else {
+                                const nearest = findNearest(item, textNodes)
+                                if (nearest) labelText = nearest.text
                             }
                         }
                     }
                 }
 
-                const inputEl = input.element as HTMLInputElement | HTMLTextAreaElement
-                const placeholder = inputEl.placeholder || input.element.getAttribute('aria-label') || ''
+                const placeholder = el.getAttribute('placeholder') || ''
+                let displayText: string
+                if (labelText) displayText = labelText
+                else if (placeholder) displayText = placeholder
+                else if (item.isInput) displayText = `[${item.type || item.tag}]`
+                else displayText = (el.textContent || '').trim().slice(0, 80) || `[${item.tag}]`
 
-                if (labelText) {
-                    displayText = labelText
-                } else if (placeholder) {
-                    displayText = placeholder
-                } else {
-                    displayText = `[${input.type || input.tag}]`
+                const result: any = {
+                    index: index++,
+                    tag: item.tag,
+                    text: displayText,
+                    selector: item.selector,
+                    isNew,
+                    position: {
+                        x: Math.round(item.rect.x),
+                        y: Math.round(item.rect.y),
+                        width: Math.round(item.rect.width),
+                        height: Math.round(item.rect.height)
+                    }
                 }
 
-                items.push({
-                    tag: input.tag,
-                    text: displayText,
-                    selector: input.selector,
-                    value: input.value,
-                    type: input.type,
-                    label: labelText || undefined,
-                    position: {
-                        x: Math.round(input.rect.x),
-                        y: Math.round(input.rect.y),
-                        width: Math.round(input.rect.width),
-                        height: Math.round(input.rect.height)
-                    }
-                })
+                // 输入类元素特有属性
+                if (item.isInput) {
+                    result.type = item.type
+                    result.label = labelText || undefined
+                    if (item.value) result.value = item.value
+                    if (item.options) result.options = item.options
+                }
+
+                // ARIA 语义
+                const role = el.getAttribute('role')
+                if (role) result.role = role
+                const ariaLabel = el.getAttribute('aria-label')
+                if (ariaLabel) result.ariaLabel = ariaLabel
+                const ariaExpanded = el.getAttribute('aria-expanded')
+                if (ariaExpanded) result.ariaExpanded = ariaExpanded
+                const ariaChecked = el.getAttribute('aria-checked')
+                if (ariaChecked) result.ariaChecked = ariaChecked
+                const ariaRequired = el.getAttribute('aria-required')
+                if (ariaRequired === 'true') result.ariaRequired = true
+                const ariaDisabled = el.getAttribute('aria-disabled')
+                if (ariaDisabled === 'true') result.ariaDisabled = true
+
+                // HTML 原生属性
+                if ('required' in el && (el as HTMLInputElement).required) result.required = true
+                if ('disabled' in el && (el as HTMLInputElement).disabled) result.disabled = true
+
+                items.push(result)
             }
 
-            for (const action of actionElements) {
-                const text = (action.element.textContent || '').trim() || `[${action.tag}]`
+            return { items, selectors: Array.from(seenSelectors) }
+        }, Array.from(prevSelectors))
 
-                items.push({
-                    tag: action.tag,
-                    text,
-                    selector: action.selector,
-                    position: {
-                        x: Math.round(action.rect.x),
-                        y: Math.round(action.rect.y),
-                        width: Math.round(action.rect.width),
-                        height: Math.round(action.rect.height)
-                    }
-                })
-            }
-
-            items.sort((a, b) => {
-                const yPosA = a.position?.y || 0
-                const yPosB = b.position?.y || 0
-                return yPosA - yPosB
-            })
-
-            return items
-        })
-
-        return result
+        // 更新缓存
+        this.previousSelectors.set(conversationId, new Set(result.selectors))
+        return result.items
     }
 
     async detectVerification(conversationId: string): Promise<boolean> {
@@ -1138,6 +1503,7 @@ export class BrowserManager {
                 }
             }
             this.browsers.delete(conversationId)
+            this.previousSelectors.delete(conversationId)
             return true
         }
         return false

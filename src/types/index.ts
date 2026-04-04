@@ -1,4 +1,4 @@
-type ActionType = 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'finish_task';
+type ActionType = 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'finish_task' | 'close_browser';
 
 export interface ApiResponse<T = any> {
   code: number
@@ -42,20 +42,37 @@ export interface ScrollInfo {
   hasMoreAbove: boolean;
 }
 
+export interface SelectOption {
+  value: string;
+  text: string;
+}
+
 export interface PageState {
   url: string;
   title: string;
   elements: PageElement[];
+  elementText: string;
   scrollInfo?: ScrollInfo;
 }
 
 export interface PageElement {
+  index: number;
   tag: string;
   text: string;
   selector: string;
   value?: string;
   type?: string;
   label?: string;
+  role?: string;
+  ariaLabel?: string;
+  ariaExpanded?: string;
+  ariaChecked?: string;
+  ariaRequired?: boolean;
+  ariaDisabled?: boolean;
+  required?: boolean;
+  disabled?: boolean;
+  options?: SelectOption[];
+  isNew?: boolean;
   position?: {
     x: number;
     y: number;
@@ -67,6 +84,7 @@ export interface PageElement {
 export interface Action {
   action_id: string;
   action: ActionType;
+  index?: number;
   selector?: string;
   value?: string;
   url?: string;
@@ -90,13 +108,26 @@ export interface ResultMessage {
   task: string;
   error?: string;
   pageState?: PageState;
+  // 多动作结果（新增）
+  results?: MultiActionResult[];
+  completed_count?: number;
+  stopped_reason?: 'page_change' | 'error' | 'all_done';
 }
 
 export type ClientMessage = TaskMessage | ResultMessage;
 
 export interface ActionMessage {
   type: 'action';
-  action: Action;
+  action?: Action;           // 单动作（向后兼容）
+  actions?: Action[];        // 多动作（新增）
+  stop_on_page_change?: boolean;  // 页面变化时是否停止后续动作（默认 true）
+}
+
+export interface MultiActionResult {
+  action_id: string
+  success: boolean
+  execution_time: number
+  error?: string
 }
 
 export interface FinishMessage {
@@ -107,6 +138,13 @@ export interface FinishMessage {
 export interface ErrorMessage {
   type: 'error';
   message: string;
+}
+
+export interface MultiActionResult {
+  action_id: string
+  success: boolean
+  execution_time: number
+  error?: string
 }
 
 export type ServerMessage = ActionMessage | FinishMessage | ErrorMessage;

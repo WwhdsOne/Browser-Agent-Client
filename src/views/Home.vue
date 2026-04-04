@@ -150,7 +150,7 @@ import { useConversationStore } from '@/stores/conversation'
 import { useBrowserStore } from '@/stores/browser'
 import { useThemeStore } from '@/stores/theme'
 import { WebSocketManager } from '@/utils/websocket'
-import type { ServerMessage, Action } from '@/types'
+import type { ServerMessage, Action, ActionMessage } from '@/types'
 import ConversationList from '@/components/ConversationList.vue'
 import ChatHeader from '@/components/ChatHeader.vue'
 import MessageList from '@/components/MessageList.vue'
@@ -362,11 +362,15 @@ const handleDelete = async (id: string) => {
 
 const handleWSMessage = async (message: ServerMessage) => {
   if (!conversationStore.currentConversation) return
-  
+
   switch (message.type) {
     case 'action':
-      if (message.action) {
-        await executeAction(message.action)
+      if ((message as ActionMessage).actions && (message as ActionMessage).actions!.length > 0) {
+        // 多动作模式
+        await executeActions((message as ActionMessage).actions!, (message as ActionMessage).stop_on_page_change !== false)
+      } else if ((message as ActionMessage).action) {
+        // 单动作模式（向后兼容）
+        await executeAction((message as ActionMessage).action!)
       }
       break
     case 'finish':
@@ -380,6 +384,158 @@ const handleWSMessage = async (message: ServerMessage) => {
       isExecuting.value = false
       break
   }
+}
+
+/**
+ * 多动作顺序执行
+ * 页面变化（URL 改变）时中断后续动作，返回已执行的结果
+ */
+const executeActions = async (actions: Action[], stopOnPageChange: boolean = true) => {
+  if (!conversationStore.currentConversation || actions.length === 0) return
+
+  isExecuting.value = true
+  const conversation = conversationStore.currentConversation
+  const conversationId = conversation.id
+  const startTime = Date.now()
+  const results: { action_id: string; success: boolean; execution_time: number; error?: string }[] = []
+
+  // 获取执行前的 URL
+  const stateBefore = await window.electronAPI.browser.getState(conversationId)
+  const urlBefore = stateBefore?.url || ''
+
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i]
+    const actionStart = Date.now()
+
+    console.log(`[多动作] ${i + 1}/${actions.length}: ${action.action}${action.index !== undefined ? ` index=${action.index}` : ''}${action.value ? ` value=${action.value}` : ''}`)
+
+    let result = await window.electronAPI.browser.execute(conversationId, action)
+
+    // 浏览器丢失恢复
+    if (!result.success && result.error?.includes('Browser not found')) {
+      console.log('[多动作] 浏览器不可用，尝试重新启动...')
+      browserStore.closeBrowser(conversationId).catch(() => {})
+
+      let browserResult
+      if (conversation.browser_type === 'existing') {
+        const chromeInfo = await window.electronAPI.chrome.getDefaultPath()
+        if (chromeInfo.found && chromeInfo.path) {
+          browserResult = await browserStore.connectOrLaunchBrowser(chromeInfo.path, conversationId)
+        }
+      } else {
+        browserResult = await browserStore.createBrowser(conversationId)
+      }
+
+      if (browserResult?.success) {
+        result = await window.electronAPI.browser.execute(conversationId, action)
+      }
+    }
+
+    results.push({
+      action_id: action.action_id,
+      success: result.success,
+      execution_time: Date.now() - actionStart,
+      error: result.error
+    })
+
+    // 登录页检测（仅对最后一个 action 的结果）
+    const pageState = result.pageState
+    const currentUrl = pageState?.url || ''
+
+    if (!confirmedLoginUrls.value.has(currentUrl)) {
+      const isLoginPage = await window.electronAPI.browser.detectLogin(conversationId)
+      if (isLoginPage) {
+        isPaused.value = true
+        pauseReason.value = 'login'
+        pendingActionId.value = action.action_id
+        isExecuting.value = false
+
+        // 发送已完成的部分结果
+        wsManager.value?.send({
+          type: 'result',
+          action_id: actions[0].action_id,
+          message_id: currentMessageId.value,
+          success: true,
+          execution_time: Date.now() - startTime,
+          task: currentTask.value,
+          pageState,
+          results,
+          completed_count: i + 1,
+          stopped_reason: 'page_change'
+        })
+        return
+      }
+    }
+
+    // 页面变化检测：URL 变化时中断
+    if (stopOnPageChange && currentUrl && currentUrl !== urlBefore && i < actions.length - 1) {
+      console.log(`[多动作] 页面变化 ${urlBefore} → ${currentUrl}，停止后续动作`)
+      results.push({
+        action_id: 'stopped',
+        success: true,
+        execution_time: 0,
+        error: '页面变化中断'
+      })
+
+      wsManager.value?.send({
+        type: 'result',
+        action_id: actions[0].action_id,
+        message_id: currentMessageId.value,
+        success: true,
+        execution_time: Date.now() - startTime,
+        task: currentTask.value,
+        pageState,
+        results,
+        completed_count: i + 1,
+        stopped_reason: 'page_change'
+      })
+
+      await messageListRef.value?.refreshExpandedActions()
+      isExecuting.value = false
+      return
+    }
+
+    // 单个动作失败也中断
+    if (!result.success && i < actions.length - 1) {
+      console.log(`[多动作] 动作 ${i + 1} 失败: ${result.error}，停止后续动作`)
+
+      wsManager.value?.send({
+        type: 'result',
+        action_id: actions[0].action_id,
+        message_id: currentMessageId.value,
+        success: false,
+        execution_time: Date.now() - startTime,
+        task: currentTask.value,
+        error: result.error,
+        pageState,
+        results,
+        completed_count: i + 1,
+        stopped_reason: 'error'
+      })
+
+      await messageListRef.value?.refreshExpandedActions()
+      isExecuting.value = false
+      return
+    }
+  }
+
+  // 所有动作执行完毕，发送汇总结果
+  const finalState = await window.electronAPI.browser.getState(conversationId)
+  wsManager.value?.send({
+    type: 'result',
+    action_id: actions[0].action_id,
+    message_id: currentMessageId.value,
+    success: results.every(r => r.success),
+    execution_time: Date.now() - startTime,
+    task: currentTask.value,
+    pageState: finalState || undefined,
+    results,
+    completed_count: actions.length,
+    stopped_reason: 'all_done'
+  })
+
+  await messageListRef.value?.refreshExpandedActions()
+  isExecuting.value = false
 }
 
 const executeAction = async (action: Action) => {
