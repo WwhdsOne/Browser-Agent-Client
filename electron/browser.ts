@@ -722,14 +722,6 @@ export class BrowserManager {
         return {url, title, elements, elementText, scrollInfo, screenshot}
     }
 
-    // =============================
-    // 视觉截图支持（Route B：带编号标签截图）
-    // =============================
-
-    /**
-     * 注入元素编号标签到页面上
-     * 在每个可交互元素的左上角叠加橙色编号标签（如 [0]、[1]）
-     */
     private async injectElementLabels(page: Page, elements: PageElement[]): Promise<void> {
         // 只处理有 position 的元素
         const items = elements
@@ -759,19 +751,13 @@ export class BrowserManager {
         }, items)
     }
 
-    /**
-     * 移除页面上注入的元素编号标签
-     */
     private async removeElementLabels(page: Page): Promise<void> {
         await page.evaluate(() => {
             document.querySelectorAll('[data-vision-label]').forEach(el => el.remove())
         })
     }
 
-    /**
-     * 拍摄带编号标签的截图（注入标签 → 截图 → 清除标签）
-     * 返回 base64 编码的 JPEG 图片字符串
-     */
+    /** 返回 base64 编码的 JPEG */
     private async takeScreenshotWithLabels(page: Page, elements: PageElement[]): Promise<string> {
         await this.injectElementLabels(page, elements)
         try {
