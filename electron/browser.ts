@@ -52,6 +52,7 @@ export interface PageState {
     elements: PageElement[]
     elementText: string
     scrollInfo?: ScrollInfo
+    screenshot?: string // base64 编码的带标签截图（供视觉模型使用）
 }
 
 export interface Action {
@@ -712,8 +713,73 @@ export class BrowserManager {
         // 生成 LLM 可读的编号索引文本
         const elementText = this.generateElementText(url, title, elements, scrollInfo)
 
+        // 拍摄带编号标签的截图（供视觉模型使用）
+        const t4 = Date.now()
+        const screenshot = await this.takeScreenshotWithLabels(page, elements)
+        console.log(`[getState] screenshot: ${Date.now() - t4}ms, size: ${(screenshot.length / 1024).toFixed(1)}KB`)
+
         console.log(`[getState] 总计: ${Date.now() - t0}ms, 元素数: ${elements.length}`)
-        return {url, title, elements, elementText, scrollInfo}
+        return {url, title, elements, elementText, scrollInfo, screenshot}
+    }
+
+    // =============================
+    // 视觉截图支持（Route B：带编号标签截图）
+    // =============================
+
+    /**
+     * 注入元素编号标签到页面上
+     * 在每个可交互元素的左上角叠加橙色编号标签（如 [0]、[1]）
+     */
+    private async injectElementLabels(page: Page, elements: PageElement[]): Promise<void> {
+        // 只处理有 position 的元素
+        const items = elements
+            .filter(el => el.position && el.position.width > 0 && el.position.height > 0)
+            .map(el => ({index: el.index, x: el.position!.x, y: el.position!.y}))
+
+        await page.evaluate((items) => {
+            // 移除已有标签
+            document.querySelectorAll('[data-vision-label]').forEach(el => el.remove())
+
+            // 创建全屏透明容器
+            const container = document.createElement('div')
+            container.id = 'lbagent-vision-labels'
+            container.setAttribute('data-vision-label', 'container')
+            container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483646;overflow:visible;margin:0;padding:0;'
+
+            // 为每个元素创建编号标签
+            for (const item of items) {
+                const label = document.createElement('div')
+                label.setAttribute('data-vision-label', 'label')
+                label.textContent = `[${item.index}]`
+                label.style.cssText = `position:fixed;left:${item.x - 2}px;top:${item.y - 18}px;background:#FF6B35;color:white;padding:1px 4px;font-size:10px;font-weight:bold;border-radius:2px;font-family:monospace;white-space:nowrap;pointer-events:none;line-height:1.3;box-shadow:0 1px 3px rgba(0,0,0,0.3);z-index:2147483647;`
+                container.appendChild(label)
+            }
+
+            document.body.appendChild(container)
+        }, items)
+    }
+
+    /**
+     * 移除页面上注入的元素编号标签
+     */
+    private async removeElementLabels(page: Page): Promise<void> {
+        await page.evaluate(() => {
+            document.querySelectorAll('[data-vision-label]').forEach(el => el.remove())
+        })
+    }
+
+    /**
+     * 拍摄带编号标签的截图（注入标签 → 截图 → 清除标签）
+     * 返回 base64 编码的 JPEG 图片字符串
+     */
+    private async takeScreenshotWithLabels(page: Page, elements: PageElement[]): Promise<string> {
+        await this.injectElementLabels(page, elements)
+        try {
+            const buffer = await page.screenshot({type: 'jpeg', quality: 80})
+            return buffer.toString('base64')
+        } finally {
+            await this.removeElementLabels(page)
+        }
     }
 
     /**

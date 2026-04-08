@@ -53,6 +53,7 @@ export interface PageState {
   elements: PageElement[];
   elementText: string;
   scrollInfo?: ScrollInfo;
+  screenshot?: string; // base64 编码的带标签截图（供视觉模型使用）
 }
 
 export interface PageElement {
