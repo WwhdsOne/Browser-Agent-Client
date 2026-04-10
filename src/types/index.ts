@@ -61,8 +61,9 @@ export interface PageElement {
   tag: string;
   text: string;
   selector: string;
+  type?: string;          // 元素类型（input, button, question等）
+  question?: string;      // 题目文本（仅当type=question时有值）
   value?: string;
-  type?: string;
   label?: string;
   role?: string;
   ariaLabel?: string;
@@ -72,20 +73,15 @@ export interface PageElement {
   ariaDisabled?: boolean;
   required?: boolean;
   disabled?: boolean;
-  options?: SelectOption[];
+  options?: PageElement[];  // 选项列表（仅question类型使用）
   isNew?: boolean;
-  position?: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
 }
 
 export interface Action {
   action_id: string;
   action: ActionType;
   index?: number;
+  option_index?: number;  // 用于选择题的选项索引
   selector?: string;
   value?: string;
   url?: string;

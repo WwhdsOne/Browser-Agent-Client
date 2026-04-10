@@ -14,8 +14,9 @@ export interface PageElement {
   tag: string
   text: string
   selector: string
+  type?: string          // 元素类型（input, button, question等）
+  question?: string      // 题目文本（仅当type=question时有值）
   value?: string
-  type?: string
   label?: string
   role?: string
   ariaLabel?: string
@@ -25,14 +26,8 @@ export interface PageElement {
   ariaDisabled?: boolean
   required?: boolean
   disabled?: boolean
-  options?: SelectOption[]
+  options?: PageElement[]  // 选项列表（select类型用SelectOption[]，question类型用PageElement[]）
   isNew?: boolean
-  position?: {
-    x: number
-    y: number
-    width: number
-    height: number
-  }
 }
 
 export interface ScrollInfo {

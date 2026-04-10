@@ -401,11 +401,10 @@ export class BrowserManager {
             const context = page.context()
             const pagesBefore = context.pages()
             const urlBefore = page.url()
-            const pagesCountBefore = pagesBefore.length
 
             switch (action.action) {
                 case 'goto':
-                    await page.goto(action.url!, {waitUntil: 'domcontentloaded', timeout: 10000})
+                    await page.goto(action.url!, {waitUntil: 'domcontentloaded'})
                     break
                 case 'click':
                     if (!resolvedSelector) {
@@ -473,33 +472,22 @@ export class BrowserManager {
                     return {success: false, error: `未知操作: ${action.action}`}
             }
 
-            await page.waitForTimeout(5000)
+            await page.waitForTimeout(2000)
 
             const pagesAfter = context.pages()
-            const pagesCountAfter = pagesAfter.length
 
-            // 检查是否有新页面打开（数量增加）
-            if (pagesCountAfter > pagesCountBefore) {
-                // 有新页面打开，新页面通常是最后一个
+            if (pagesAfter.length > 1) {
                 const newPage = pagesAfter[pagesAfter.length - 1]
-                const oldPage = pagesAfter[0]  // 最早的页面
 
-                console.log(`[页面管理] 检测到新页面打开（${pagesCountBefore} → ${pagesCountAfter}）`)
-                console.log(`[页面管理] 最早页面: ${oldPage.url()}`)
-                console.log(`[页面管理] 最新页面: ${newPage.url()}`)
-
-                // 只关闭最早的页面
-                if (oldPage !== newPage && !oldPage.isClosed()) {
-                    console.log(`[关闭最早页面] ${oldPage.url()}`)
-                    await oldPage.close().catch(() => {})
+                for (const p of pagesAfter) {
+                    if (p !== newPage && !p.isClosed()) {
+                        console.log(`[关闭旧页面] ${p.url()}`)
+                        await p.close().catch(() => {})
+                    }
                 }
 
-                // 切换到新页面
                 this.browsers.set(conversationId, {browser, page: newPage, isExisting: instance.isExisting})
                 console.log(`[保留新页面] ${newPage.url()}`)
-            } else if (pagesCountAfter === pagesCountBefore && page.url() !== urlBefore) {
-                // 页面数量没变，但URL变了（当前页面导航到新URL）
-                console.log(`[页面管理] URL变化: ${urlBefore} → ${page.url()}`)
             }
 
             const pageState = await this.getPageState(conversationId)
@@ -635,29 +623,74 @@ export class BrowserManager {
     private async resolveIndexToSelector(page: Page, index: number): Promise<string | null> {
         try {
             const selector = await page.evaluate((targetIndex: number) => {
-                // 直接从保存的元素列表读取，而不是重新收集
-                const elements = window.__lbagent_elements || []
+                const viewportHeight = window.innerHeight
+                const viewportWidth = window.innerWidth
 
-                console.log(`[resolveIndexToSelector] 查找 index=${targetIndex}，元素总数=${elements.length}`)
-
-                if (targetIndex < 0 || targetIndex >= elements.length) {
-                    console.error(`[resolveIndexToSelector] index ${targetIndex} 超出范围！`)
-                    console.error(`[resolveIndexToSelector] 可用元素:`, elements.map((el, i) => ({
-                        index: i,
-                        tag: el.tag,
-                        text: el.text?.slice(0, 50)
-                    })))
+                const generateSelector = (el: Element): string | null => {
+                    if (el.id) return `#${el.id}`
+                    const name = el.getAttribute('name')
+                    if (name) return `[name="${name}"]`
+                    const ariaLabel = el.getAttribute('aria-label')
+                    if (ariaLabel) return `[aria-label="${ariaLabel}"]`
+                    const placeholder = el.getAttribute('placeholder')
+                    if (placeholder && placeholder.length < 30) return `[placeholder="${placeholder}"]`
+                    if (el.tagName.toLowerCase() === 'a') {
+                        const href = el.getAttribute('href')
+                        if (href && href.length < 80 && !href.startsWith('javascript:')) return `a[href="${href}"]`
+                    }
+                    const tagName = el.tagName.toLowerCase()
+                    if (['input', 'textarea', 'select'].includes(tagName)) {
+                        const classList = Array.from(el.classList)
+                        if (classList.length > 0) return `${tagName}.${classList[0]}`
+                    }
                     return null
                 }
 
-                const targetElement = elements[targetIndex]
-                if (!targetElement) {
-                    console.error(`[resolveIndexToSelector] 元素 ${targetIndex} 为空！`)
-                    return null
+                const isInViewport = (rect: DOMRect): boolean =>
+                    rect.top < viewportHeight && rect.bottom > 0 && rect.left < viewportWidth && rect.right > 0
+
+                const isInteractable = (el: Element): boolean => {
+                    const style = window.getComputedStyle(el)
+                    if (style.display === 'none' || style.visibility === 'hidden') return false
+                    if (style.opacity === '0') return false
+                    const htmlEl = el as HTMLElement
+                    return htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0
                 }
 
-                console.log(`[resolveIndexToSelector] index=${targetIndex} (${targetElement.tag}) → ${targetElement.selector}`)
-                return targetElement.selector
+                const allSelectors = [
+                    'input:not([type="hidden"]):not([disabled])',
+                    'textarea:not([disabled])',
+                    'select:not([disabled])',
+                    'button:not([disabled])',
+                    'a[href]:not([href=""])',
+                    '[role="button"]:not([disabled])',
+                    '[role="link"]:not([disabled])',
+                    '[role="tab"]:not([disabled])',
+                    '[role="menuitem"]:not([disabled])',
+                    '[role="option"]:not([disabled])',
+                    '[role="checkbox"]:not([disabled])',
+                    '[role="radio"]:not([disabled])',
+                    '[role="switch"]:not([disabled])',
+                    '[onclick]:not([disabled])'
+                ]
+
+                const seen = new Set<string>()
+                const collected: { selector: string; y: number; x: number }[] = []
+
+                for (const sel of allSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const rect = el.getBoundingClientRect()
+                        if (!isInViewport(rect) || !isInteractable(el)) return
+                        const elementSelector = generateSelector(el)
+                        if (!elementSelector || elementSelector.length > 100) return
+                        if (seen.has(elementSelector)) return
+                        seen.add(elementSelector)
+                        collected.push({selector: elementSelector, y: rect.y + rect.height / 2, x: rect.x + rect.width / 2})
+                    })
+                }
+
+                collected.sort((a, b) => a.y - b.y || a.x - b.x)
+                return collected[targetIndex]?.selector || null
             }, index)
 
             return selector
@@ -675,86 +708,47 @@ export class BrowserManager {
 
         const {page} = instance
 
-        // 等待页面稳定（处理页面跳转中的上下文销毁问题）
-        try {
-            await page.waitForLoadState('domcontentloaded', {timeout: 3000}).catch(() => {
-                // 忽略超时，页面可能已经加载完成
-            })
-        } catch (e) {
-            // 忽略错误，继续尝试提取状态
-        }
-
         const t0 = Date.now()
         const url = page.url()
         console.log(`[getState] url: ${Date.now() - t0}ms`)
 
         const t1 = Date.now()
-        let title = ''
-        try {
-            title = await page.title()
-            console.log(`[getState] title: ${Date.now() - t1}ms`)
-        } catch (e) {
-            // 页面跳转中，使用 URL 作为标题
-            console.warn(`[getState] title() 失败，使用 URL 作为标题:`, e)
-            title = url
-        }
+        const title = await page.title()
+        console.log(`[getState] title: ${Date.now() - t1}ms`)
 
         const t2 = Date.now()
-        let elements: PageElement[] = []
-        try {
-            elements = await this.extractPageElements(page, conversationId)
-            console.log(`[getState] extractPageElements: ${Date.now() - t2}ms`)
-        } catch (e) {
-            // 页面跳转中，返回空元素列表
-            console.warn(`[getState] extractPageElements 失败，返回空列表:`, e)
-            elements = []
-        }
+        const elements = await this.extractPageElements(page, conversationId)
+        console.log(`[getState] extractPageElements: ${Date.now() - t2}ms`)
 
         // 保存元素列表到页面，供 executeAction 使用（特别是处理 option_index）
-        if (elements.length > 0) {
-            try {
-                await page.evaluate((elems: any[]) => {
-                    window.__lbagent_elements = elems
-                }, elements)
-            } catch (e) {
-                console.warn(`[getState] 保存元素列表失败，跳过:`, e)
-            }
-        }
+        await page.evaluate((elems: any[]) => {
+            window.__lbagent_elements = elems
+        }, elements)
 
         const t3 = Date.now()
-        let scrollInfo: ScrollInfo | undefined
-        try {
-            scrollInfo = await page.evaluate(() => {
-                const doc = document.documentElement
-                const scrollHeight = doc.scrollHeight
-                const clientHeight = doc.clientHeight
-                const scrollTop = window.scrollY
+        const scrollInfo = await page.evaluate(() => {
+            const doc = document.documentElement
+            const scrollHeight = doc.scrollHeight
+            const clientHeight = doc.clientHeight
+            const scrollTop = window.scrollY
 
-                return {
-                    scrollHeight,
-                    clientHeight,
-                    scrollTop,
-                    hasMoreBelow: scrollTop + clientHeight < scrollHeight - 10,
-                    hasMoreAbove: scrollTop > 10
-                }
-            })
-            console.log(`[getState] scrollInfo: ${Date.now() - t3}ms`)
-        } catch (e) {
-            console.warn(`[getState] scrollInfo 获取失败，跳过:`, e)
-        }
+            return {
+                scrollHeight,
+                clientHeight,
+                scrollTop,
+                hasMoreBelow: scrollTop + clientHeight < scrollHeight - 10,
+                hasMoreAbove: scrollTop > 10
+            }
+        })
+        console.log(`[getState] scrollInfo: ${Date.now() - t3}ms`)
 
         // 生成 LLM 可读的编号索引文本
         const elementText = this.generateElementText(url, title, elements, scrollInfo)
 
         // 拍摄带编号标签的截图（供视觉模型使用）
         const t4 = Date.now()
-        let screenshot = ''
-        try {
-            screenshot = await this.takeScreenshotWithLabels(page, elements)
-            console.log(`[getState] screenshot: ${Date.now() - t4}ms, size: ${(screenshot.length / 1024).toFixed(1)}KB`)
-        } catch (e) {
-            console.warn(`[getState] screenshot 失败，跳过截图:`, e)
-        }
+        const screenshot = await this.takeScreenshotWithLabels(page, elements)
+        console.log(`[getState] screenshot: ${Date.now() - t4}ms, size: ${(screenshot.length / 1024).toFixed(1)}KB`)
 
         console.log(`[getState] 总计: ${Date.now() - t0}ms, 元素数: ${elements.length}`)
         return {url, title, elements, elementText, scrollInfo, screenshot}
