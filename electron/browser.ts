@@ -1190,6 +1190,21 @@ export class BrowserManager {
                     if (href && href.length < 80 && !href.startsWith('javascript:')) return `a[href="${href}"]`
                 }
 
+                // 对于 button 元素，优先使用 data-* 属性区分
+                if (tagName === 'button') {
+                    const dataAttrs = Array.from(el.attributes)
+                        .filter(attr => attr.name.startsWith('data-') && attr.value)
+                        .map(attr => `[${attr.name}="${attr.value}"]`)
+
+                    const classList = Array.from(el.classList).filter(c => !c.includes('active') && !c.includes('focus'))
+                    const classSelector = classList.length > 0 ? `${tagName}.${classList[0]}` : tagName
+
+                    // 组合 class 和 data-* 属性，使选择器唯一
+                    if (dataAttrs.length > 0) {
+                        return `${classSelector}${dataAttrs.join('')}`
+                    }
+                }
+
                 const classList = Array.from(el.classList).filter(c => !c.includes('active') && !c.includes('focus'))
                 if (classList.length > 0) return `${tagName}.${classList[0]}`
 
