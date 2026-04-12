@@ -1,7 +1,7 @@
 import type {Browser, Page} from 'playwright'
 import {exec, spawn} from 'child_process'
 import {promisify} from 'util'
-import {existsSync, mkdirSync} from 'fs'
+import {existsSync, mkdirSync, copyFile} from 'fs'
 import {platform, homedir} from 'os'
 import {join, dirname} from 'path'
 
@@ -86,6 +86,26 @@ export interface ChromeInfo {
 }
 
 const CDP_PORT = 9222
+
+/**
+ * 获取 Chrome 的默认下载路径
+ */
+function getChromeDownloadPath(): string {
+    const currentPlatform = platform()
+    const home = homedir()
+
+    // 所有平台都使用 ~/Downloads 作为默认下载路径
+    return join(home, 'Downloads')
+}
+
+/**
+ * 确保目录存在，不存在则创建
+ */
+function ensureDir(dirPath: string): void {
+    if (!existsSync(dirPath)) {
+        mkdirSync(dirPath, {recursive: true})
+    }
+}
 
 function escapeSelector(selector: string): string {
     if (!selector) return selector
@@ -462,14 +482,35 @@ export class BrowserManager {
                             console.log(`[下载] 检测到下载: ${download.suggestedFilename()}`)
 
                             try {
-                                // 等待下载完成
-                                const path = await download.path()
-                                console.log(`[下载] 保存到: ${path}`)
+                                // 等待下载完成到 Playwright 临时目录
+                                const tempPath = await download.path()
+                                console.log(`[下载] 临时路径: ${tempPath}`)
+
+                                // 获取 Chrome 下载目录
+                                const downloadDir = getChromeDownloadPath()
+                                ensureDir(downloadDir)
+
+                                // 目标路径
+                                const targetPath = join(downloadDir, download.suggestedFilename())
+                                console.log(`[下载] 复制到: ${targetPath}`)
+
+                                // 复制文件到 Chrome 下载目录
+                                await new Promise<void>((copyResolve, copyReject) => {
+                                    copyFile(tempPath, targetPath, (err) => {
+                                        if (err) {
+                                            console.error('[下载] 复制失败:', err)
+                                            copyReject(err)
+                                        } else {
+                                            console.log(`[下载] 复制成功`)
+                                            copyResolve()
+                                        }
+                                    })
+                                })
 
                                 resolve({
                                     filename: download.suggestedFilename(),
                                     suggestedFilename: download.suggestedFilename(),
-                                    path
+                                    path: targetPath  // 返回 Chrome 下载目录中的路径
                                 })
                             } catch (error) {
                                 console.error('[下载] 处理失败:', error)
