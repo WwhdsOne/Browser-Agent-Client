@@ -1,5 +1,11 @@
 type ActionType = 'goto' | 'click' | 'input' | 'select' | 'scroll' | 'wait' | 'finish_task' | 'close_browser';
 
+export interface DownloadInfo {
+  filename: string        // 原始文件名
+  suggestedFilename: string // 浏览器建议的文件名
+  path?: string           // 保存路径（如果可获取）
+}
+
 export interface ApiResponse<T = any> {
   code: number
   message?: string

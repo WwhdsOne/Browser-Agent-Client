@@ -438,6 +438,13 @@ const executeActions = async (actions: Action[], stopOnPageChange: boolean = tru
       error: result.error
     })
 
+    // 下载信息提示
+    if (result.downloadInfo?.filename) {
+      successMessage.value = `文件已下载: ${result.downloadInfo.filename}`
+      setTimeout(() => { successMessage.value = '' }, 5000)
+      console.log(`[下载信息] ${result.downloadInfo.filename}`, result.downloadInfo)
+    }
+
     // 登录页检测（仅对最后一个 action 的结果）
     const pageState = result.pageState
     const currentUrl = pageState?.url || ''

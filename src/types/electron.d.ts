@@ -46,13 +46,19 @@ export interface PageState {
   scrollInfo?: ScrollInfo
 }
 
+export interface DownloadInfo {
+  filename: string
+  suggestedFilename: string
+  path?: string
+}
+
 export interface ElectronAPI {
   browser: {
     create: (conversationId: string) => Promise<boolean>
     connectExisting: (conversationId: string) => Promise<{ success: boolean; error?: string }>
     isCDPReady: () => Promise<boolean>
     connectOrLaunch: (chromePath: string, conversationId: string) => Promise<{ success: boolean; error?: string }>
-    execute: (conversationId: string, action: any) => Promise<{ success: boolean; error?: string; pageState?: PageState }>
+    execute: (conversationId: string, action: any) => Promise<{ success: boolean; error?: string; pageState?: PageState; downloadInfo?: DownloadInfo }>
     getState: (conversationId: string) => Promise<PageState>
     close: (conversationId: string) => Promise<boolean>
     detectVerification: (conversationId: string) => Promise<boolean>

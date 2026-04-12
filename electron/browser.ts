@@ -66,10 +66,17 @@ export interface Action {
     timeout?: number
 }
 
+export interface DownloadInfo {
+    filename: string        // 原始文件名
+    suggestedFilename: string // 浏览器建议的文件名
+    path?: string           // 保存路径（如果可获取）
+}
+
 export interface ActionResult {
     success: boolean
     error?: string
     pageState?: PageState
+    downloadInfo?: DownloadInfo // 下载文件信息
 }
 
 export interface ChromeInfo {
@@ -403,6 +410,10 @@ export class BrowserManager {
             const urlBefore = page.url()
             const pagesCountBefore = pagesBefore.length
 
+            // 下载处理
+            let downloadInfo: DownloadInfo | undefined = undefined
+            let downloadPromise: Promise<DownloadInfo> | null = null
+
             switch (action.action) {
                 case 'goto':
                     await page.goto(action.url!, {waitUntil: 'domcontentloaded', timeout: 10000})
@@ -439,8 +450,48 @@ export class BrowserManager {
                         console.log(`[executeAction] click: index=${action.index} selector=${resolvedSelector}`)
                     }
 
+                    // 设置下载事件监听（在点击之前）
+                    downloadPromise = new Promise<DownloadInfo>((resolve) => {
+                        const timeout = setTimeout(() => {
+                            console.log('[下载] 未检测到下载事件（可能不是下载链接）')
+                            resolve({filename: '', suggestedFilename: ''})
+                        }, 2000)
+
+                        page.once('download', async (download) => {
+                            clearTimeout(timeout)
+                            console.log(`[下载] 检测到下载: ${download.suggestedFilename()}`)
+
+                            try {
+                                // 等待下载完成
+                                const path = await download.path()
+                                console.log(`[下载] 保存到: ${path}`)
+
+                                resolve({
+                                    filename: download.suggestedFilename(),
+                                    suggestedFilename: download.suggestedFilename(),
+                                    path
+                                })
+                            } catch (error) {
+                                console.error('[下载] 处理失败:', error)
+                                resolve({
+                                    filename: download.suggestedFilename(),
+                                    suggestedFilename: download.suggestedFilename()
+                                })
+                            }
+                        })
+                    })
+
                     await this.highlightElement(page, escapeSelector(resolvedSelector), action.index)
                     await this.smartClick(page, escapeSelector(resolvedSelector))
+
+                    // 等待下载事件（如果有）
+                    if (downloadPromise) {
+                        downloadInfo = await downloadPromise
+                        if (downloadInfo.filename) {
+                            console.log(`[下载] 文件已保存: ${downloadInfo.filename}`)
+                        }
+                    }
+
                     await page.waitForLoadState('domcontentloaded')
                     break
                 case 'input':
@@ -503,7 +554,7 @@ export class BrowserManager {
             }
 
             const pageState = await this.getPageState(conversationId)
-            return {success: true, pageState}
+            return {success: true, pageState, downloadInfo}
         } catch (error) {
             return {success: false, error: String(error)}
         }
