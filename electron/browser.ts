@@ -1,7 +1,7 @@
 import type {Browser, Page} from 'playwright'
 import {exec, spawn} from 'child_process'
 import {promisify} from 'util'
-import {existsSync, mkdirSync, copyFile} from 'fs'
+import {existsSync, mkdirSync, rename, unlink} from 'fs'
 import {platform, homedir} from 'os'
 import {join, dirname} from 'path'
 
@@ -492,17 +492,21 @@ export class BrowserManager {
 
                                 // 目标路径
                                 const targetPath = join(downloadDir, download.suggestedFilename())
-                                console.log(`[下载] 复制到: ${targetPath}`)
+                                console.log(`[下载] 移动到: ${targetPath}`)
 
-                                // 复制文件到 Chrome 下载目录
-                                await new Promise<void>((copyResolve, copyReject) => {
-                                    copyFile(tempPath, targetPath, (err) => {
+                                // 移动文件到 Chrome 下载目录
+                                await new Promise<void>((moveResolve, moveReject) => {
+                                    rename(tempPath, targetPath, (err) => {
                                         if (err) {
-                                            console.error('[下载] 复制失败:', err)
-                                            copyReject(err)
+                                            // 如果是跨设备错误（EXDEV），尝试手动删除临时文件
+                                            console.error('[下载] 移动失败:', err)
+                                            if ((err as any).code === 'EXDEV') {
+                                                console.log('[下载] 跨设备移动，临时文件将保留')
+                                            }
+                                            moveReject(err)
                                         } else {
-                                            console.log(`[下载] 复制成功`)
-                                            copyResolve()
+                                            console.log(`[下载] 移动成功，临时文件已删除`)
+                                            moveResolve()
                                         }
                                     })
                                 })
@@ -514,6 +518,17 @@ export class BrowserManager {
                                 })
                             } catch (error) {
                                 console.error('[下载] 处理失败:', error)
+
+                                // 尝试删除临时文件
+                                try {
+                                    const tempPath = await download.path()
+                                    unlink(tempPath, () => {
+                                        console.log('[下载] 临时文件已删除')
+                                    })
+                                } catch (cleanupError) {
+                                    console.error('[下载] 清理临时文件失败:', cleanupError)
+                                }
+
                                 resolve({
                                     filename: download.suggestedFilename(),
                                     suggestedFilename: download.suggestedFilename()
